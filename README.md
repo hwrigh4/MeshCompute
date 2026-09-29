@@ -3,11 +3,9 @@
 MeshCompute coordinates preemptible compute contributed by providers. `PROJECT.md`
 is the product and architecture source of truth.
 
-Phase 1 implements a FastAPI controller, PostgreSQL persistence, SQLAlchemy models,
-Alembic migrations, environment configuration, and basic worker identities.
-The worker, CLI, scheduler, executor, and example directories are scaffolding only.
-Worker agents, heartbeats, resource advertisement, jobs, and execution belong to
-later phases.
+Phases 1–2 implement the FastAPI/PostgreSQL controller and a Linux worker agent
+with authenticated heartbeats, resource reporting, and Docker availability
+detection. Jobs, scheduling, reservations, and workload execution are not implemented.
 
 ## Run locally
 
@@ -31,8 +29,9 @@ Migrations run explicitly; the application does not create tables at startup.
 
 The development database is bound to localhost with development-only credentials.
 Registration and listing are currently unauthenticated: keep this foundation on
-a trusted local network. A registration issues a credential for future worker
-authentication; Phase 1 has no authenticated worker operations yet.
+a trusted local network. Worker-specific heartbeats require the registration
+bearer token. Use HTTPS when connecting outside localhost to protect that token
+in transit.
 
 ## Smoke check
 
@@ -47,8 +46,10 @@ curl --fail 'http://127.0.0.1:8000/v1/workers?limit=100&offset=0'
 - `GET /health` returns `{"status":"ok"}` when PostgreSQL is reachable, or HTTP
   503 when unavailable. It checks connectivity, not migration status.
 - `POST /v1/workers/register` returns HTTP 201 with a new UUID, name, agent version,
-  `REGISTERING` state, timestamps, and a one-time bearer `token`. Save the ID and
-  token securely. Only a SHA-256 digest of the random token is persisted.
+  `REGISTERING` state, timestamps, and a one-time bearer `token`. Supply the token
+  to the worker through its process environment. Only a SHA-256 digest of the
+  random token is persisted by the controller; neither component writes the
+  plaintext token to disk or logs.
   Each registration creates a separate identity; names need not be unique.
 - `GET /v1/workers` returns identities without tokens or token hashes, ordered by
   creation time and ID. `limit` defaults to 100 (maximum 1000); `offset` defaults
@@ -59,3 +60,110 @@ To check migration/model consistency, run `alembic check`. To stop the local
 database while preserving its data, run `docker compose down`.
 
 No automated test suite is included at this phase, per `AGENTS.md` and `PROJECT.md`.
+
+## Register and start a Linux worker
+
+The agent uses an existing identity; it does not register automatically or save
+credentials locally. This example captures the registration response in memory
+without printing the token or putting it in shell history (requires `curl` and
+the activated Python environment). Do not enable shell tracing (`set -x`).
+
+```bash
+export MESHCOMPUTE_WORKER_CONTROLLER_URL=http://127.0.0.1:8000
+registration=$(curl --fail --silent --show-error \
+  "$MESHCOMPUTE_WORKER_CONTROLLER_URL/v1/workers/register" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"worker-a","agent_version":"0.1.0"}')
+export MESHCOMPUTE_WORKER_ID=$(printf '%s' "$registration" | python -c \
+  'import json,sys; print(json.load(sys.stdin)["id"])')
+export MESHCOMPUTE_WORKER_TOKEN=$(printf '%s' "$registration" | python -c \
+  'import json,sys; print(json.load(sys.stdin)["token"])')
+unset registration
+export MESHCOMPUTE_WORKER_CPU_LIMIT=2
+export MESHCOMPUTE_WORKER_MEMORY_LIMIT_MB=4096
+mesh-worker
+# Alternatively: python -m worker.main
+```
+
+Configuration comes from environment variables, with prefix `MESHCOMPUTE_WORKER_`:
+
+| Suffix | Default | Meaning |
+| --- | --- | --- |
+| `CONTROLLER_URL` | `http://127.0.0.1:8000` | Controller HTTP(S) base URL |
+| `ID` | required | Registered worker UUID |
+| `TOKEN` | required | Registration bearer token, held only in memory |
+| `CPU_LIMIT` | `0` | Contributed logical CPUs; fractional values allowed |
+| `MEMORY_LIMIT_MB` | `0` | Contributed memory in MiB (1,048,576 bytes) |
+| `DOCKER_SOCKET` | `/var/run/docker.sock` | Local Docker Engine Unix socket |
+
+For 4 CPUs and 8 GiB, set `CPU_LIMIT=4` and `MEMORY_LIMIT_MB=8192` using the full
+environment names above. Limits above detected host capacity are capped at that
+capacity; negative and nonfinite CPU limits are rejected. Zero contribution is
+valid and does not itself make a worker unhealthy. Restart the agent to change
+limits in Phase 2; local dynamic provider controls are a later phase.
+
+The worker does not read `.env` or create a credential file. Keep the token out
+of command-line arguments and logs; unset `MESHCOMPUTE_WORKER_TOKEN` when done.
+If the token is lost, register a new identity. Token rotation is not implemented.
+
+## Heartbeats and resource reporting
+
+The worker sends `POST /v1/workers/{worker_id}/heartbeat` immediately and normally
+every five seconds with `Authorization: Bearer <token>`. Network failures and
+HTTP errors are logged without response bodies or credentials and retried with
+bounded request timeouts. Redirects are not followed. SIGINT/SIGTERM cancels
+in-flight work and closes HTTP clients cleanly. Stopping the agent lets its
+heartbeat expire; no execution or preemption is involved.
+
+The payload and worker listing keep `resources`, `telemetry`, and `executors`
+separate. Resource fields include:
+
+- `cpu_physical`: detected logical CPU capacity; `cpu_physical_cores` reports
+  physical core count if available.
+- `cpu_contributed`, `cpu_reserved`, `cpu_allocatable`.
+- `memory_physical_mb`, `memory_contributed_mb`, `memory_reserved_mb`,
+  `memory_allocatable_mb`.
+
+Reserved values must be zero and allocatable values equal contributed values in
+Phase 2. This is capacity accounting, independent of CPU usage or available memory.
+Telemetry reports `cpu_usage_percent`, `load_1m` when available, and
+`memory_available_mb`. CPU architecture is reported separately.
+
+`executors.container` is true only when the configured Docker socket responds
+successfully to `/_ping` and `/info` and reports a Linux runtime. Missing Docker,
+permission errors, or daemon failures produce false and a `DEGRADED` heartbeat.
+The probe runs each cycle so daemon recovery is detected. It does not create
+containers or establish that a particular future workload will execute successfully.
+
+## Worker states
+
+| State | Meaning |
+| --- | --- |
+| `REGISTERING` | Registered identity with no heartbeat yet |
+| `HEALTHY` | Fresh heartbeat and healthy runtime; capacity may be zero |
+| `DEGRADED` | Docker/dependency failure or heartbeat age from 15 through 30 seconds |
+| `DRAINING` | Advertised participation state: no new work, let existing work finish |
+| `PAUSED` | Advertised participation state: no new work |
+| `OFFLINE` | Last heartbeat is more than 30 seconds old |
+
+The agent currently reports `HEALTHY` or `DEGRADED`. `PAUSED` and `DRAINING` are
+represented in the protocol, but local control commands are not implemented yet.
+Fresh heartbeats preserve those participation states. Staleness overrides them
+in listing responses. A fresh heartbeat recovers an offline worker, but cannot
+make a worker with unavailable Docker healthy.
+
+Freshness is calculated when workers are listed (and when a heartbeat is returned),
+using the controller's UTC receive time: under 15 seconds is fresh, 15–30 seconds
+is degraded, over 30 is offline. The database stores the latest reported state
+and heartbeat time; stale-state changes do not require a background task or database
+writes. Workers that never heartbeat remain `REGISTERING`.
+
+To observe this locally, run the worker, list `/v1/workers`, stop the worker, and
+list again after 15 and 31 seconds. An inaccessible Docker socket should produce
+`DEGRADED` immediately; a healthy Linux Docker daemon should produce `HEALTHY`.
+Heartbeat requests with missing, incorrect, or another worker's token return 401.
+
+For migration verification against a disposable database, run `alembic upgrade head`,
+`alembic check`, `alembic downgrade 0001`, then `alembic upgrade head` and
+`alembic check`. Downgrading removes Phase 2 telemetry/capabilities/resources and
+resets states to `REGISTERING`, preserving identity and token hashes.
