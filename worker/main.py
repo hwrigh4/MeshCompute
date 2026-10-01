@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import logging
 import signal
 import sys
@@ -7,13 +8,15 @@ from contextlib import suppress
 from pydantic import ValidationError
 
 from worker.agent.loop import HeartbeatRejected, run_agent
+from worker.agent.claim import ClaimFailed, claim_once
 from worker.config import WorkerSettings
-from worker.executors.docker import DockerExecutor
+from worker.executors.container import ContainerExecutor
 
 
 async def serve(settings: WorkerSettings) -> None:
     loop = asyncio.get_running_loop()
-    agent = asyncio.create_task(run_agent(settings, DockerExecutor(settings.docker_socket)))
+    executor = ContainerExecutor(settings.podman_socket, settings.docker_socket, settings.container_engine)
+    agent = asyncio.create_task(run_agent(settings, executor))
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, agent.cancel)
     try:
@@ -25,6 +28,9 @@ async def serve(settings: WorkerSettings) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="MeshCompute worker (no workload execution yet)")
+    parser.add_argument("action", nargs="?", choices=["claim"], help="claim once and print the assignment")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if sys.platform != "linux":
@@ -36,8 +42,12 @@ def main() -> None:
         raise SystemExit("Invalid worker configuration; check MESHCOMPUTE_WORKER_* settings") from None
     logging.info("Starting worker %s", settings.id)
     try:
-        asyncio.run(serve(settings))
-    except HeartbeatRejected as exc:
+        if args.action == "claim":
+            assignment = asyncio.run(claim_once(settings))
+            print(assignment.model_dump_json(indent=2) if assignment else "No work (204)")
+        else:
+            asyncio.run(serve(settings))
+    except (HeartbeatRejected, ClaimFailed) as exc:
         raise SystemExit(str(exc)) from None
     logging.info("Worker stopped")
 

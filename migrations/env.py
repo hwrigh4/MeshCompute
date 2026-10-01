@@ -5,6 +5,8 @@ from controller.database import get_engine
 from controller.models.base import Base
 from controller.models.worker import Worker  # noqa: F401 -- register model metadata
 from controller.models.job import Job  # noqa: F401 -- register model metadata
+from controller.models.job_attempt import JobAttempt  # noqa: F401
+from controller.models.worker_allocation import WorkerAllocation  # noqa: F401
 
 target_metadata = Base.metadata
 

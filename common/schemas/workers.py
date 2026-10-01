@@ -1,4 +1,5 @@
 from datetime import datetime
+from math import isclose
 from typing import Literal
 from uuid import UUID
 
@@ -36,11 +37,11 @@ class ResourceSnapshot(BaseModel):
     cpu_physical: int = Field(gt=0)
     cpu_physical_cores: int | None = Field(default=None, gt=0)
     cpu_contributed: float = Field(ge=0)
-    cpu_reserved: Literal[0] = 0
+    cpu_reserved: float = Field(default=0, ge=0)
     cpu_allocatable: float = Field(ge=0)
     memory_physical_mb: int = Field(gt=0)
     memory_contributed_mb: int = Field(ge=0)
-    memory_reserved_mb: Literal[0] = 0
+    memory_reserved_mb: int = Field(default=0, ge=0)
     memory_allocatable_mb: int = Field(ge=0)
 
     @model_validator(mode="after")
@@ -49,10 +50,10 @@ class ResourceSnapshot(BaseModel):
             raise ValueError("CPU contribution exceeds physical capacity")
         if self.memory_contributed_mb > self.memory_physical_mb:
             raise ValueError("Memory contribution exceeds physical capacity")
-        if self.cpu_allocatable != self.cpu_contributed:
-            raise ValueError("Phase 2 allocatable CPU must equal contributed CPU")
-        if self.memory_allocatable_mb != self.memory_contributed_mb:
-            raise ValueError("Phase 2 allocatable memory must equal contributed memory")
+        if not isclose(self.cpu_allocatable, max(0, self.cpu_contributed - self.cpu_reserved), abs_tol=1e-9):
+            raise ValueError("Allocatable CPU must equal unreserved contribution")
+        if self.memory_allocatable_mb != max(0, self.memory_contributed_mb - self.memory_reserved_mb):
+            raise ValueError("Allocatable memory must equal unreserved contribution")
         return self
 
 
@@ -70,6 +71,19 @@ class ExecutorCapabilities(BaseModel):
     container: bool = False
 
 
+class ContainerEngines(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    podman: bool = False
+    docker: bool = False
+
+
+class RuntimeCapabilities(BaseModel):
+    executors: ExecutorCapabilities
+    container_engines: ContainerEngines
+    healthy: bool
+
+
 class WorkerHeartbeat(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -82,6 +96,14 @@ class WorkerHeartbeat(BaseModel):
     resources: ResourceSnapshot
     telemetry: Telemetry
     executors: ExecutorCapabilities
+    container_engines: ContainerEngines | None = None
+
+    @model_validator(mode="after")
+    def validate_container_engines(self):
+        if self.container_engines is not None:
+            if self.executors.container != any(self.container_engines.model_dump().values()):
+                raise ValueError("Container capability must match usable container engines")
+        return self
 
 
 class WorkerStatus(WorkerView):
@@ -90,3 +112,4 @@ class WorkerStatus(WorkerView):
     resources: ResourceSnapshot | None
     telemetry: Telemetry | None
     executors: ExecutorCapabilities
+    container_engines: ContainerEngines | None

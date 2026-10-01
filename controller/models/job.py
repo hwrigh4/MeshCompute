@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, Enum, Float, Integer, String, func
+from sqlalchemy import DateTime, Enum, Float, Index, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,7 @@ from controller.models.base import Base
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (Index("ix_jobs_state_created_at_id", "state", "created_at", "id"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     # Reserved for a future requester identity; never accepted from the public API.

@@ -1,9 +1,9 @@
 from typing import Protocol
 
-from common.schemas.workers import ExecutorCapabilities
+from common.schemas.workers import RuntimeCapabilities
 
 
 class Executor(Protocol):
-    """Phase 2 runtime boundary; workload operations arrive in Phase 5."""
+    """Runtime capability boundary; workload operations arrive in Phase 5."""
 
-    async def capabilities(self) -> ExecutorCapabilities: ...
+    async def capabilities(self) -> RuntimeCapabilities: ...

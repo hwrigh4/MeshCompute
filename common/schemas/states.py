@@ -16,3 +16,7 @@ class JobState(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+class AttemptState(StrEnum):
+    LEASED = "LEASED"

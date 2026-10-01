@@ -1,11 +1,12 @@
 from typing import Annotated
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Body, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from common.auth.tokens import issue_worker_token
+from common.schemas.assignments import ClaimRequest, WorkAssignment
 from common.schemas.workers import (
     RegisteredWorker, WorkerRegistration, WorkerView, WorkerHeartbeat, WorkerStatus,
 )
@@ -13,6 +14,7 @@ from controller.api.auth import authenticated_worker
 from controller.services.worker_health import worker_status
 from controller.database import get_session
 from controller.models.worker import Worker
+from controller.scheduler.claims import claim_job
 
 router = APIRouter(prefix="/v1/workers", tags=["workers"])
 DatabaseSession = Annotated[Session, Depends(get_session)]
@@ -50,6 +52,8 @@ def heartbeat(
     worker: Annotated[Worker, Depends(authenticated_worker)],
     session: DatabaseSession,
 ) -> WorkerStatus:
+    # Serialize contribution changes with claims using the same worker row lock.
+    session.refresh(worker, with_for_update=True)
     worker.agent_version = payload.agent_version
     worker.last_heartbeat = datetime.now(timezone.utc)
     worker.state = payload.state
@@ -60,7 +64,20 @@ def heartbeat(
     ):
         setattr(worker, field, getattr(payload.resources, field))
     worker.executors = payload.executors.model_dump()
+    worker.container_engines = payload.container_engines.model_dump() if payload.container_engines else None
     worker.telemetry = payload.telemetry.model_dump()
     session.commit()
     session.refresh(worker)
     return worker_status(worker, datetime.now(timezone.utc))
+
+
+@router.post("/{worker_id}/claim", response_model=WorkAssignment, responses={204: {"description": "No work"}})
+def claim(
+    worker: Annotated[Worker, Depends(authenticated_worker)],
+    session: DatabaseSession,
+    payload: Annotated[ClaimRequest | None, Body()] = None,
+) -> WorkAssignment | Response:
+    assignment = claim_job(session, worker.id)
+    if assignment is None:
+        return Response(status_code=204)
+    return assignment

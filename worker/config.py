@@ -1,4 +1,6 @@
 from uuid import UUID
+import os
+from typing import Literal
 
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +18,10 @@ class WorkerSettings(BaseSettings):
     cpu_limit: float = Field(default=0, ge=0, allow_inf_nan=False)
     memory_limit_mb: int = Field(default=0, ge=0)
     docker_socket: str = "/var/run/docker.sock"
+    container_engine: Literal["auto", "podman", "docker"] = "auto"
+    podman_socket: str = Field(default_factory=lambda: (
+        f"{os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')}/podman/podman.sock"
+    ))
 
     @field_validator("token")
     @classmethod

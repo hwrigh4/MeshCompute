@@ -3,10 +3,9 @@
 MeshCompute coordinates preemptible compute contributed by providers. `PROJECT.md`
 is the product and architecture source of truth.
 
-Phases 1–3 implement the FastAPI/PostgreSQL controller and a Linux worker agent
-with authenticated heartbeats, resource reporting, and Docker availability
-detection, plus a persisted requester job queue. Jobs are not scheduled or executed;
-worker claims, reservations, and workload execution are not implemented.
+Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeats,
+Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
+assignment with resource reservations. No workloads are executed yet.
 
 ## Run locally
 
@@ -96,12 +95,14 @@ Configuration comes from environment variables, with prefix `MESHCOMPUTE_WORKER_
 | `CPU_LIMIT` | `0` | Contributed logical CPUs; fractional values allowed |
 | `MEMORY_LIMIT_MB` | `0` | Contributed memory in MiB (1,048,576 bytes) |
 | `DOCKER_SOCKET` | `/var/run/docker.sock` | Local Docker Engine Unix socket |
+| `PODMAN_SOCKET` | `$XDG_RUNTIME_DIR/podman/podman.sock` | Local Podman API socket; falls back to `/run/user/<uid>/podman/podman.sock` |
+| `CONTAINER_ENGINE` | `auto` | `auto`, `podman`, or `docker`; required engine readiness |
 
 For 4 CPUs and 8 GiB, set `CPU_LIMIT=4` and `MEMORY_LIMIT_MB=8192` using the full
 environment names above. Limits above detected host capacity are capped at that
 capacity; negative and nonfinite CPU limits are rejected. Zero contribution is
 valid and does not itself make a worker unhealthy. Restart the agent to change
-limits in Phase 2; local dynamic provider controls are a later phase.
+limits; local dynamic provider controls are a later phase.
 
 The worker does not read `.env` or create a credential file. Keep the token out
 of command-line arguments and logs; unset `MESHCOMPUTE_WORKER_TOKEN` when done.
@@ -127,16 +128,34 @@ separate. Resource fields include:
 - `memory_physical_mb`, `memory_contributed_mb`, `memory_reserved_mb`,
   `memory_allocatable_mb`.
 
-Reserved values must be zero and allocatable values equal contributed values in
-Phase 2. This is capacity accounting, independent of CPU usage or available memory.
+Controller responses derive reserved values from PostgreSQL `worker_allocations`;
+allocatable values are contribution minus reservations, floored at zero.
+Heartbeat resource fields describe the worker's local view and never overwrite
+the controller's ledger. The current agent still reports zero local reservations
+because it executes no workloads. Capacity is independent of CPU usage or available memory.
 Telemetry reports `cpu_usage_percent`, `load_1m` when available, and
 `memory_available_mb`. CPU architecture is reported separately.
 
-`executors.container` is true only when the configured Docker socket responds
-successfully to `/_ping` and `/info` and reports a Linux runtime. Missing Docker,
-permission errors, or daemon failures produce false and a `DEGRADED` heartbeat.
-The probe runs each cycle so daemon recovery is detected. It does not create
-containers or establish that a particular future workload will execute successfully.
+`executors.container` is true when either configured Podman or Docker socket
+responds successfully to `/_ping` and `/info` and reports a Linux runtime.
+`container_engines` reports `podman` and `docker` usability separately. Both may
+be true. Missing sockets, permission errors, or daemon failures make that engine
+unavailable. The probe runs each heartbeat cycle without pulling images or
+creating containers. A successful probe does not guarantee a future workload's success.
+
+Podman's Docker-compatible API allows the same read-only probe for both engines.
+The default Podman socket targets the current user's rootless service; rootless
+Podman is the preferred direction for future execution. The agent does not install
+Podman, start its service, or change system configuration. See the
+[Podman API service documentation](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html)
+for socket setup. A different socket can be configured explicitly.
+
+With `CONTAINER_ENGINE=auto`, either usable engine makes the agent healthy.
+Explicit `podman` or `docker` requires that engine to be usable; otherwise the
+agent reports `DEGRADED`, even if the other engine is available. Both engines'
+actual availability is still advertised. No execution selection policy is implemented.
+Engine metadata is optional for older heartbeat clients; omitted metadata is
+stored as unknown (`null`). When supplied, it must agree with `executors.container`.
 
 ## Worker states
 
@@ -144,7 +163,7 @@ containers or establish that a particular future workload will execute successfu
 | --- | --- |
 | `REGISTERING` | Registered identity with no heartbeat yet |
 | `HEALTHY` | Fresh heartbeat and healthy runtime; capacity may be zero |
-| `DEGRADED` | Docker/dependency failure or heartbeat age from 15 through 30 seconds |
+| `DEGRADED` | Required runtime/dependency failure or heartbeat age from 15 through 30 seconds |
 | `DRAINING` | Advertised participation state: no new work, let existing work finish |
 | `PAUSED` | Advertised participation state: no new work |
 | `OFFLINE` | Last heartbeat is more than 30 seconds old |
@@ -155,7 +174,7 @@ Fresh heartbeats preserve those participation states. Staleness overrides them
 in listing responses. A fresh heartbeat recovers an offline worker, but cannot
 make a worker reporting runtime failure or no usable executors healthy. The
 controller checks advertised executor availability generically; only the current
-agent's runtime probe is Docker-specific.
+agent knows which local engines back its runtime.
 
 Freshness is calculated when workers are listed (and when a heartbeat is returned),
 using the controller's UTC receive time: under 15 seconds is fresh, 15–30 seconds
@@ -163,17 +182,12 @@ is degraded, over 30 is offline. The database stores the latest reported state
 and heartbeat time; stale-state changes do not require a background task or database
 writes. Workers that never heartbeat remain `REGISTERING`.
 The API uses `effective_worker_state` in `controller/services/worker_health.py`;
-future scheduling must use the same function rather than persisted state alone.
+scheduling uses the same function rather than persisted state alone.
 
 To observe this locally, run the worker, list `/v1/workers`, stop the worker, and
-list again after 15 and 31 seconds. An inaccessible Docker socket should produce
-`DEGRADED` immediately; a healthy Linux Docker daemon should produce `HEALTHY`.
+list again after 15 and 31 seconds. With automatic engine selection, two unavailable
+engine sockets produce `DEGRADED`; either usable Linux engine produces `HEALTHY`.
 Heartbeat requests with missing, incorrect, or another worker's token return 401.
-
-For migration verification against a disposable database, run `alembic upgrade head`,
-`alembic check`, `alembic downgrade 0001`, then `alembic upgrade head` and
-`alembic check`. Downgrading removes Phase 2 telemetry/capabilities/resources and
-resets states to `REGISTERING`, preserving identity and token hashes.
 
 ## Job queue (Phase 3)
 
@@ -209,8 +223,8 @@ element. CPU must be positive and finite; fractional CPUs are accepted. Memory
 (MiB), timeout (seconds), and maximum attempts must be positive integers, at most
 2,147,483,647. Invalid requests return 422, including NaN/infinity. Resource
 requests are not compared with current worker capacity; a job can be queued even
-with no workers. `max_attempts` is stored for later phases; there are no attempts
-or retry behavior yet.
+with no workers. `max_attempts` is stored for future recovery policy; Phase 4
+creates attempt 1 on assignment and has no retries.
 
 List, retrieve, and cancel jobs (replace the UUID with one returned by submission):
 
@@ -230,15 +244,116 @@ without changing timestamps. Other states return 409; their history is preserved
 | Job state | Meaning |
 | --- | --- |
 | `QUEUED` | Persisted and waiting; all new jobs begin here |
-| `RUNNING` | Execution in progress (reserved for later phases) |
+| `RUNNING` | Assigned to a worker; does not mean a container is executing in Phase 4 |
 | `SUCCEEDED` | Successful completion (reserved for later phases) |
 | `FAILED` | Unsuccessful completion (reserved for later phases) |
 | `CANCELLED` | Requester cancelled the queued job |
 
 The `jobs` table uses a string runtime, JSONB command array, and a nullable
 `owner_id` for future requester identity. This field is not accepted from API
-clients. No worker assignment or attempt records are created.
+clients. Submitting a job creates no assignment until a worker claims it.
 
 Against a disposable database, verify the Phase 3 migration with `alembic upgrade
 head`, `alembic check`, `alembic downgrade 0002`, `alembic upgrade head`, and
 `alembic check`. Downgrading to Phase 2 drops jobs; worker data is preserved.
+
+## Worker claims and reservations (Phase 4)
+
+Keep `mesh-worker` running to send heartbeats. In another terminal with the same
+worker environment, explicitly ask for one assignment:
+
+```bash
+mesh-worker claim
+```
+
+This prints an assignment or `No work (204)` and exits. It performs one request
+and never executes the command. The normal heartbeat loop does not automatically
+claim work in this phase. A failed claim response may conceal a committed assignment;
+the command does not automatically retry. Recovery and reconciliation are later phases.
+
+The equivalent authenticated API request is:
+
+```bash
+curl --include --fail -X POST \
+  "$MESHCOMPUTE_WORKER_CONTROLLER_URL/v1/workers/$MESHCOMPUTE_WORKER_ID/claim" \
+  -H "Authorization: Bearer $MESHCOMPUTE_WORKER_TOKEN"
+```
+
+No job ID is supplied. The controller returns HTTP 204 with an empty body if the
+worker is ineligible or there is no fitting job. An assignment returns HTTP 200:
+
+```json
+{
+  "attempt_id": "<uuid>",
+  "job_id": "<uuid>",
+  "runtime": "container",
+  "image": "python:3.12-slim",
+  "command": ["python", "-c", "print(1)"],
+  "resources": {"cpu": 2, "memory_mb": 2048},
+  "timeout_seconds": 600
+}
+```
+
+Requester runtime stays `container`; Podman and Docker are worker implementation
+details, never scheduler placement keys. Eligibility requires effective current
+state `HEALTHY`, a matching advertised runtime, and enough unreserved CPU and
+memory. Stale, degraded, paused, draining, and never-heartbeating workers receive
+no work. Utilization telemetry does not affect eligibility.
+
+For worker-pull placement, the policy is **oldest compatible fitting job first**,
+then job ID to break creation-time ties. Oversized or incompatible earlier jobs
+are skipped. This is the simple pull-oriented alternative to global best-fit
+worker selection: the controller does not hold work for another worker or push
+assignments. A locked job may be skipped by a concurrent claim.
+
+Each claim transaction:
+
+1. Locks the requesting worker row, then reads controller allocations.
+2. Checks effective health, generic runtime compatibility, and available resources.
+3. Selects a queued job with `FOR UPDATE SKIP LOCKED`.
+4. Creates a `LEASED` attempt and its allocation, and changes the job to `RUNNING`.
+5. Commits all changes together before returning the assignment.
+
+The worker lock serializes simultaneous claims for that worker; heartbeats share
+that lock when changing contributions. The job lock prevents duplicate assignment
+and is the same lock used by requester cancellation. If cancellation wins, no
+attempt/reservation is created. If assignment wins, cancellation sees `RUNNING`
+and returns 409. Errors before commit roll back all assignment changes.
+
+`job_attempts` references job and worker identities and uniquely numbers attempts
+per job starting at 1. `worker_allocations` uses the attempt ID as its primary key,
+allowing at most one allocation per attempt. Its CPU and memory values are the
+controller's reservation source of truth. The queue index supports state/order
+selection. Reserved CPU uses PostgreSQL numeric/decimal arithmetic to avoid
+fractional CPU summation drift; memory is stored in integer MiB. Allocation and
+attempt worker indexes support worker lookups. The
+attempt-number unique index also covers lookups by job ID.
+
+In Phase 4, `RUNNING` means assigned and attempt `LEASED` means reserved. Job and
+attempt start timestamps, attempt completion, and lease expiration remain null.
+No container is launched, and there is no lease renewal/expiry, resource release,
+retry, or recovery. Reservations persist across controller and agent restarts.
+Reducing contribution below existing reservations leaves zero allocatable capacity
+and blocks further claims; it does not preempt or release existing assignments.
+
+For a local smoke check, register two logical workers, advertise 2 CPU/4096 MiB
+and 4 CPU/8192 MiB, submit fitting and oversized jobs, and invoke claims using
+each worker's token. Inspect `/v1/workers` for controller-side reserved/allocatable
+resources and `/v1/jobs/{id}` for state. Multiple logical workers may run on one
+development machine with independent IDs and environment settings. Engine APIs
+are used only for availability detection; a local simulation may also send
+authenticated heartbeats directly.
+
+Verify migration `0004` on a disposable database:
+
+```bash
+alembic upgrade head
+alembic check
+alembic downgrade 0003
+alembic upgrade head
+alembic check
+```
+
+Downgrading drops attempt/allocation data and engine metadata, preserving workers
+and jobs. Jobs assigned by Phase 4 are reset to `QUEUED` during this explicit
+downgrade because no workload has executed; this is not automatic retry behavior.

@@ -35,9 +35,10 @@ async def run_agent(settings: WorkerSettings, executor: Executor) -> None:
                 resources, telemetry = detect_resources(settings.cpu_limit, settings.memory_limit_mb)
                 payload = WorkerHeartbeat(
                     agent_version=agent_version,
-                    state=WorkerState.HEALTHY if capabilities.container else WorkerState.DEGRADED,
+                    state=WorkerState.HEALTHY if capabilities.healthy else WorkerState.DEGRADED,
                     cpu_architecture=platform.machine(),
-                    resources=resources, telemetry=telemetry, executors=capabilities,
+                    resources=resources, telemetry=telemetry, executors=capabilities.executors,
+                    container_engines=capabilities.container_engines,
                 )
                 response = await client.post(
                     f"v1/workers/{settings.id}/heartbeat", json=payload.model_dump(mode="json"),
