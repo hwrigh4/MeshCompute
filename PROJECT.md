@@ -1042,9 +1042,13 @@ Only after the end-to-end prototype works, add:
 - resource-accounting tests
 - executor security tests
 
-### Later product phase — Provider client
+### Later product phase — Provider web dashboard
 
-After the compute MVP is stable, build the provider-facing device fleet experience:
+After the compute MVP is stable, build the provider-facing device fleet experience as a web application first. A native desktop client is optional later and should only be added if the web experience cannot satisfy important local-only workflows.
+
+The web dashboard requires a real provider/user identity model and device ownership/association. Keep this post-MVP so account/auth complexity does not block proving distributed compute.
+
+Build:
 
 - provider identity/account model
 - device-to-provider association
@@ -1200,9 +1204,9 @@ Eventually allow consumer workers to automatically yield resources when:
 
 Local user activity always wins.
 
-### Provider client and device fleet
+### Provider web dashboard and device fleet
 
-Longer term, a provider should be able to manage all of their registered MeshCompute devices from one client experience.
+Longer term, a provider should be able to manage all of their registered MeshCompute devices from one web dashboard. Start with a browser-based control plane rather than a native client application.
 
 Conceptually:
 
@@ -1220,7 +1224,7 @@ Conceptually:
        12 GB          0 GB           32 GB
 ```
 
-The provider client should eventually support:
+The provider web dashboard should eventually support:
 
 - list all devices registered to the provider
 - show current effective state and last-seen time
@@ -1245,7 +1249,7 @@ A provider physically using a machine must always be able to reclaim it even if:
 - the network is unavailable
 - account authentication is broken
 
-The future provider account/device model must therefore complement, not replace, local controls.
+The future provider account/device model must therefore complement, not replace, local controls. Browser sessions communicate only with the MeshCompute controller; browsers must not connect directly to provider devices.
 
 This feature will eventually require provider/user identity and secure association of worker identities with an account. Do not add that account system during the current MVP.
 
@@ -1275,7 +1279,7 @@ Platform packaging may eventually include:
 - Windows installer/service
 - macOS package/launch service
 
-The installer, updater, account-linking flow, and polished provider client are post-MVP product work.
+The installer, updater, account-linking flow, and polished provider web dashboard are post-MVP product work.
 
 ### Marketplace
 
