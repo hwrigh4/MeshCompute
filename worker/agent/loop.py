@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL = 5
 
 
+class HeartbeatRejected(RuntimeError):
+    """A permanent controller response that requires operator intervention."""
+
+
 async def run_agent(settings: WorkerSettings, executor: Executor) -> None:
     psutil.cpu_percent(interval=None)  # Prime the utilization sample.
     agent_version = version("meshcompute")
@@ -40,7 +44,13 @@ async def run_agent(settings: WorkerSettings, executor: Executor) -> None:
                 )
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                logger.warning("Heartbeat rejected (HTTP %s); retrying", exc.response.status_code)
+                status = exc.response.status_code
+                if status not in (408, 429) and not 500 <= status < 600:
+                    raise HeartbeatRejected(
+                        f"Heartbeat rejected (HTTP {status}); check controller URL, "
+                        "worker ID/token, and agent/controller protocol compatibility"
+                    ) from None
+                logger.warning("Heartbeat failed (HTTP %s); retrying", status)
             except httpx.RequestError:
                 logger.warning("Controller unavailable; retrying heartbeat")
             except (OSError, RuntimeError, ValueError):

@@ -9,7 +9,6 @@ from common.auth.tokens import issue_worker_token
 from common.schemas.workers import (
     RegisteredWorker, WorkerRegistration, WorkerView, WorkerHeartbeat, WorkerStatus,
 )
-from common.schemas.states import WorkerState
 from controller.api.auth import authenticated_worker
 from controller.services.worker_health import worker_status
 from controller.database import get_session
@@ -54,8 +53,6 @@ def heartbeat(
     worker.agent_version = payload.agent_version
     worker.last_heartbeat = datetime.now(timezone.utc)
     worker.state = payload.state
-    if worker.state == WorkerState.HEALTHY and not payload.executors.container:
-        worker.state = WorkerState.DEGRADED
     worker.cpu_architecture = payload.cpu_architecture
     for field in (
         "cpu_physical", "cpu_physical_cores", "cpu_contributed",

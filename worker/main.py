@@ -6,7 +6,7 @@ from contextlib import suppress
 
 from pydantic import ValidationError
 
-from worker.agent.loop import run_agent
+from worker.agent.loop import HeartbeatRejected, run_agent
 from worker.config import WorkerSettings
 from worker.executors.docker import DockerExecutor
 
@@ -35,7 +35,10 @@ def main() -> None:
         # Never print configuration values, even in validation errors.
         raise SystemExit("Invalid worker configuration; check MESHCOMPUTE_WORKER_* settings") from None
     logging.info("Starting worker %s", settings.id)
-    asyncio.run(serve(settings))
+    try:
+        asyncio.run(serve(settings))
+    except HeartbeatRejected as exc:
+        raise SystemExit(str(exc)) from None
     logging.info("Worker stopped")
 
 

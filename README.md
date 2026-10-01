@@ -109,9 +109,11 @@ If the token is lost, register a new identity. Token rotation is not implemented
 ## Heartbeats and resource reporting
 
 The worker sends `POST /v1/workers/{worker_id}/heartbeat` immediately and normally
-every five seconds with `Authorization: Bearer <token>`. Network failures and
-HTTP errors are logged without response bodies or credentials and retried with
-bounded request timeouts. Redirects are not followed. SIGINT/SIGTERM cancels
+every five seconds with `Authorization: Bearer <token>`. Network/request failures,
+HTTP 408, 429, and 5xx responses retry with bounded request timeouts. Other HTTP
+errors (including 400, 401, 403, 404, and 422) stop the agent with a nonzero exit
+and a concise configuration/authentication/protocol error. Logs omit response
+bodies and credentials. Redirects are not followed and stop the agent too. SIGINT/SIGTERM cancels
 in-flight work and closes HTTP clients cleanly. Stopping the agent lets its
 heartbeat expire; no execution or preemption is involved.
 
@@ -150,13 +152,17 @@ The agent currently reports `HEALTHY` or `DEGRADED`. `PAUSED` and `DRAINING` are
 represented in the protocol, but local control commands are not implemented yet.
 Fresh heartbeats preserve those participation states. Staleness overrides them
 in listing responses. A fresh heartbeat recovers an offline worker, but cannot
-make a worker with unavailable Docker healthy.
+make a worker reporting runtime failure or no usable executors healthy. The
+controller checks advertised executor availability generically; only the current
+agent's runtime probe is Docker-specific.
 
 Freshness is calculated when workers are listed (and when a heartbeat is returned),
 using the controller's UTC receive time: under 15 seconds is fresh, 15–30 seconds
 is degraded, over 30 is offline. The database stores the latest reported state
 and heartbeat time; stale-state changes do not require a background task or database
 writes. Workers that never heartbeat remain `REGISTERING`.
+The API uses `effective_worker_state` in `controller/services/worker_health.py`;
+future scheduling must use the same function rather than persisted state alone.
 
 To observe this locally, run the worker, list `/v1/workers`, stop the worker, and
 list again after 15 and 31 seconds. An inaccessible Docker socket should produce
