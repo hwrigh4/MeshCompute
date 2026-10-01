@@ -75,7 +75,9 @@ The provider is running code submitted by someone else.
 
 Workloads must execute inside a restricted runtime that protects the host.
 
-The MVP uses Docker containers. Docker is an implementation of the runtime interface, not the architecture itself.
+The MVP uses OCI containers. Podman and Docker are container-engine implementations behind the runtime interface, not the architecture itself.
+
+For Linux provider machines, prefer rootless Podman where practical because it reduces dependence on a privileged daemon and aligns well with the provider-host security model. Docker Engine remains supported for compatibility and ecosystem reach. The provider should ultimately be able to choose an engine explicitly or allow the worker to auto-detect one.
 
 ### 5. Runtime capabilities are abstract
 
@@ -116,7 +118,7 @@ Expected future runtimes:
 - capability-aware scheduling
 - atomic resource reservation
 - worker pull model
-- Docker-based execution
+- OCI container execution through Podman or Docker
 - leases
 - retries
 - provider preemption
@@ -146,7 +148,8 @@ Do not build these until the core system works:
 - multi-region controllers
 - advanced pricing
 - production-grade multi-tenancy
-- GUI
+- provider GUI / multi-device client app
+- production installer/updater
 - checkpointing implementation
 - comprehensive automated tests
 
@@ -176,7 +179,8 @@ Tests will be added after the first end-to-end prototype works.
          Python             Python             Python
              |                  |                  |
              v                  v                  v
-       DockerExecutor      DockerExecutor      DockerExecutor
+       ContainerExecutor   ContainerExecutor   ContainerExecutor
+       Podman/Docker       Podman/Docker       Podman/Docker
 ```
 
 Workers initiate outbound communication with the controller.
@@ -216,9 +220,12 @@ Initial stack:
 - asyncio
 - psutil
 - HTTPX
-- Docker Engine API
+- OCI container-engine API integration
+- Podman and Docker adapters
 
 Linux is the only required MVP worker platform.
+
+Container jobs use the generic `container` runtime. The requester should not normally care whether a compatible worker fulfills that runtime with Podman or Docker.
 
 ---
 
@@ -237,6 +244,8 @@ meshcompute/
 │   ├── agent/
 │   ├── executors/
 │   │   ├── base.py
+│   │   ├── container.py
+│   │   ├── podman.py
 │   │   └── docker.py
 │   ├── preemption/
 │   ├── resources/
@@ -287,11 +296,17 @@ class Executor:
         ...
 ```
 
-The first implementation is:
+The first workload family is container execution:
 
 ```text
-DockerExecutor
+ContainerExecutor
+   |
+   +-- PodmanExecutor
+   |
+   +-- DockerExecutor
 ```
+
+Podman should be preferred on Linux when a usable rootless installation is available. Docker remains a supported fallback and explicit provider choice.
 
 Future implementations may include:
 
@@ -725,7 +740,31 @@ Do not build advanced optimization during the MVP.
 
 ---
 
-## Docker executor
+## Container execution
+
+The job-level runtime is `container`, not `docker` or `podman`.
+
+A provider may eventually configure:
+
+```text
+container_engine = auto
+container_engine = podman
+container_engine = docker
+```
+
+For `auto`, prefer a usable rootless Podman environment on Linux, then fall back to Docker Engine when available. Engine selection is a worker concern and should not change requester job semantics.
+
+Conceptual structure:
+
+```text
+ContainerExecutor
+       |
+       +-- PodmanExecutor
+       |
+       +-- DockerExecutor
+```
+
+Both engines must enforce the same MeshCompute security and resource policy as closely as the underlying platform permits.
 
 Initial execution flow:
 
@@ -758,7 +797,7 @@ report result
 Initial container restrictions should include:
 
 - no privileged mode
-- no Docker socket
+- no container-engine socket exposed to the workload
 - no host PID namespace
 - no host networking
 - no arbitrary host mounts
@@ -892,7 +931,7 @@ Build:
 - heartbeat loop
 - worker states
 - capability advertisement
-- Docker executor detection
+- container executor capability detection (Phase 2 initially probes Docker; Podman support is added before execution work)
 
 Goal:
 
@@ -925,12 +964,16 @@ Build:
 - job attempts
 - worker claim endpoint
 
-### Phase 5 — Execution
+### Phase 5 — Container execution
 
 Build:
 
+- generic ContainerExecutor boundary
+- PodmanExecutor
 - DockerExecutor
-- image pull
+- provider-selectable engine: auto / podman / docker
+- prefer rootless Podman in auto mode when usable
+- OCI image pull
 - container launch
 - CPU/memory limits
 - output capture
@@ -998,6 +1041,31 @@ Only after the end-to-end prototype works, add:
 - preemption tests
 - resource-accounting tests
 - executor security tests
+
+### Later product phase — Provider client
+
+After the compute MVP is stable, build the provider-facing device fleet experience:
+
+- provider identity/account model
+- device-to-provider association
+- multi-device inventory
+- online/offline/effective health display
+- resource contribution controls
+- pause/resume/drain/reclaim actions
+- per-device runtime/engine capability display
+- secure remote control requests with local worker authority preserved
+
+### Later product phase — Installer and updater
+
+Package the worker for normal users:
+
+- guided install
+- secure device registration
+- service management
+- secure credential storage
+- Podman/Docker detection and configuration guidance
+- signed upgrades
+- uninstall and device revocation
 
 ---
 
@@ -1132,6 +1200,83 @@ Eventually allow consumer workers to automatically yield resources when:
 
 Local user activity always wins.
 
+### Provider client and device fleet
+
+Longer term, a provider should be able to manage all of their registered MeshCompute devices from one client experience.
+
+Conceptually:
+
+```text
+                  Provider Account
+                        |
+                 Provider Console
+                        |
+          +-------------+-------------+
+          |             |             |
+          v             v             v
+       Desktop       Laptop         Home Server
+       HEALTHY        PAUSED         OFFLINE
+       6 CPU          0 CPU          8 CPU
+       12 GB          0 GB           32 GB
+```
+
+The provider client should eventually support:
+
+- list all devices registered to the provider
+- show current effective state and last-seen time
+- show contributed and allocatable CPU, memory, and eventually GPU
+- show basic utilization/health telemetry
+- request pause/resume
+- request drain
+- change contributed CPU/memory/GPU limits
+- request cancellation of individual workloads
+- request stop-all / reclaim-all
+- rename devices
+- remove/revoke a device
+- view installed worker version and update status
+- show which container engine/runtime capabilities each device supports
+
+Remote controls are convenience features. The local worker remains authoritative.
+
+A provider physically using a machine must always be able to reclaim it even if:
+
+- the provider console is unavailable
+- the controller is unavailable
+- the network is unavailable
+- account authentication is broken
+
+The future provider account/device model must therefore complement, not replace, local controls.
+
+This feature will eventually require provider/user identity and secure association of worker identities with an account. Do not add that account system during the current MVP.
+
+### Installer and updates
+
+A real consumer/provider product needs installation and lifecycle management rather than expecting users to manually create environments and export tokens.
+
+Future installers should aim to:
+
+- install the MeshCompute worker
+- register or securely attach the device to a provider account
+- store worker credentials in an OS-appropriate secure credential store
+- configure the worker as an OS-managed background service
+- detect available container engines
+- optionally guide installation/configuration of Podman or Docker
+- prefer rootless Podman on supported Linux systems when practical
+- configure contribution defaults
+- support clean uninstall/device revocation
+- support signed worker updates
+- preserve provider settings across upgrades
+
+Do not silently install or reconfigure a container engine without explicit provider consent.
+
+Platform packaging may eventually include:
+
+- Linux packages / installer script
+- Windows installer/service
+- macOS package/launch service
+
+The installer, updater, account-linking flow, and polished provider client are post-MVP product work.
+
 ### Marketplace
 
 Only after useful compute supply and demand are demonstrated should MeshCompute add:
@@ -1165,7 +1310,8 @@ job queue
        +
 scheduler
        +
-DockerExecutor
+ContainerExecutor
+(Podman / Docker)
        +
 leases/retries
        +
