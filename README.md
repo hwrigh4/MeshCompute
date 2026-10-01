@@ -7,6 +7,12 @@ Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeat
 Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
 assignment with resource reservations. No workloads are executed yet.
 
+The Phase 4.5 [local functional lab](docs/development.md) adds Make commands,
+simulated logical workers, repeatable scheduler/concurrency scenarios, state
+inspection, real-engine diagnostics, and buildable OCI examples. Start with
+`make dev-up`; in another terminal use `make test-scheduler` (destructive local
+reset confirmation required). Phase 5 execution remains unimplemented.
+
 ## Run locally
 
 Requires Python 3.12+ and Docker Compose (or an existing PostgreSQL database).
