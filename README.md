@@ -3,9 +3,10 @@
 MeshCompute coordinates preemptible compute contributed by providers. `PROJECT.md`
 is the product and architecture source of truth.
 
-Phases 1–2 implement the FastAPI/PostgreSQL controller and a Linux worker agent
+Phases 1–3 implement the FastAPI/PostgreSQL controller and a Linux worker agent
 with authenticated heartbeats, resource reporting, and Docker availability
-detection. Jobs, scheduling, reservations, and workload execution are not implemented.
+detection, plus a persisted requester job queue. Jobs are not scheduled or executed;
+worker claims, reservations, and workload execution are not implemented.
 
 ## Run locally
 
@@ -173,3 +174,71 @@ For migration verification against a disposable database, run `alembic upgrade h
 `alembic check`, `alembic downgrade 0001`, then `alembic upgrade head` and
 `alembic check`. Downgrading removes Phase 2 telemetry/capabilities/resources and
 resets states to `REGISTERING`, preserving identity and token hashes.
+
+## Job queue (Phase 3)
+
+Requester job endpoints are unauthenticated in this local MVP. Anyone with access
+to the controller can submit, inspect, or cancel queued jobs. Keep the controller
+on a trusted local network. No accounts or requester authorization are implemented.
+
+Submit a container workload:
+
+```bash
+curl --fail -X POST http://127.0.0.1:8000/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "monte-carlo",
+    "runtime": "container",
+    "image": "python:3.12-slim",
+    "command": ["python", "-c", "print(sum(i*i for i in range(1000)))"],
+    "resources": {"cpu": 0.5, "memory_mb": 2048},
+    "timeout_seconds": 600,
+    "max_attempts": 3
+  }'
+```
+
+The response is HTTP 201 with a UUID, `QUEUED` state, and timestamps. Resource
+requests appear in responses as `cpu_requested` and `memory_requested_mb`.
+`started_at` and `completed_at` initially remain null. Commands are stored as an
+argument array without trimming or shell interpretation. The image is only a
+reference: the controller does not pull it or verify its contents.
+
+Names and image references must be nonempty (maximum 128 and 2048 characters).
+Only `container` is accepted as runtime. Commands require at least one string
+element. CPU must be positive and finite; fractional CPUs are accepted. Memory
+(MiB), timeout (seconds), and maximum attempts must be positive integers, at most
+2,147,483,647. Invalid requests return 422, including NaN/infinity. Resource
+requests are not compared with current worker capacity; a job can be queued even
+with no workers. `max_attempts` is stored for later phases; there are no attempts
+or retry behavior yet.
+
+List, retrieve, and cancel jobs (replace the UUID with one returned by submission):
+
+```bash
+curl --fail 'http://127.0.0.1:8000/v1/jobs?limit=100&offset=0'
+job_id=REPLACE_WITH_JOB_UUID
+curl --fail "http://127.0.0.1:8000/v1/jobs/$job_id"
+curl --fail -X POST "http://127.0.0.1:8000/v1/jobs/$job_id/cancel"
+```
+
+Listing uses oldest creation time first, then ID; `limit` defaults to 100
+(maximum 1000), and `offset` defaults to zero. Retrieval and cancellation return
+404 for an unknown UUID. Cancellation returns HTTP 200, transitions `QUEUED` to
+`CANCELLED`, and sets `completed_at`. Repeating cancellation returns the same job
+without changing timestamps. Other states return 409; their history is preserved.
+
+| Job state | Meaning |
+| --- | --- |
+| `QUEUED` | Persisted and waiting; all new jobs begin here |
+| `RUNNING` | Execution in progress (reserved for later phases) |
+| `SUCCEEDED` | Successful completion (reserved for later phases) |
+| `FAILED` | Unsuccessful completion (reserved for later phases) |
+| `CANCELLED` | Requester cancelled the queued job |
+
+The `jobs` table uses a string runtime, JSONB command array, and a nullable
+`owner_id` for future requester identity. This field is not accepted from API
+clients. No worker assignment or attempt records are created.
+
+Against a disposable database, verify the Phase 3 migration with `alembic upgrade
+head`, `alembic check`, `alembic downgrade 0002`, `alembic upgrade head`, and
+`alembic check`. Downgrading to Phase 2 drops jobs; worker data is preserved.

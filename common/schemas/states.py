@@ -8,3 +8,11 @@ class WorkerState(StrEnum):
     DRAINING = "DRAINING"
     PAUSED = "PAUSED"
     OFFLINE = "OFFLINE"
+
+
+class JobState(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
