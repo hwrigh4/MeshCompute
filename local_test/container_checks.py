@@ -6,7 +6,7 @@ import signal
 import subprocess
 from uuid import uuid4
 
-from devtools.examples import NAMES
+from local_test.examples import NAMES
 
 RESTRICTIONS = ["--network=none", "--cpus=1", "--memory=128m", "--pids-limit=64",
                 "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges"]

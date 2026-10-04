@@ -2,6 +2,7 @@ import asyncio
 
 import httpx
 
+from worker.executors.base import ExecutionBackend
 from common.schemas.workers import ContainerEngines, ExecutorCapabilities, RuntimeCapabilities
 
 
@@ -36,3 +37,15 @@ class ContainerExecutor:
             container_engines=ContainerEngines(podman=podman, docker=docker),
             healthy=(podman or docker) if self.engine == "auto" else {"podman": podman, "docker": docker}[self.engine],
         )
+
+    async def select(self) -> ExecutionBackend:
+        """Re-probe at execution time; explicit choices never fall back."""
+        from worker.executors.compatible import ExecutionError
+        from worker.executors.podman import PodmanExecutor
+        from worker.executors.docker import DockerExecutor
+
+        if self.engine in ('auto', 'podman') and await engine_usable(self.podman_socket):
+            return PodmanExecutor(self.podman_socket)
+        if self.engine in ('auto', 'docker') and await engine_usable(self.docker_socket):
+            return DockerExecutor(self.docker_socket)
+        raise ExecutionError('ENGINE_UNAVAILABLE')

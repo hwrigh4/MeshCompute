@@ -9,7 +9,7 @@ class ClaimFailed(RuntimeError):
 
 
 async def claim_once(settings: WorkerSettings) -> WorkAssignment | None:
-    """Make one explicit claim; Phase 4 never launches or retries an assignment."""
+    """Make one explicit claim; this function never launches or retries an assignment."""
     try:
         async with httpx.AsyncClient(
             base_url=str(settings.controller_url).rstrip("/") + "/",

@@ -9,7 +9,7 @@ dev-db-up:
 	$(COMPOSE) up -d postgres
 
 dev-migrate:
-	$(PYTHON) -m devtools.lab wait-db
+	$(PYTHON) -m local_test.lab wait-db
 	$(PYTHON) -m alembic upgrade head
 
 dev-controller: dev-migrate
@@ -24,53 +24,79 @@ dev-down:
 	$(COMPOSE) down
 
 dev-reset:
-	$(PYTHON) -m devtools.lab reset $(CONFIRM)
+	$(PYTHON) -m local_test.lab reset $(CONFIRM)
 
 dev-status:
-	$(PYTHON) -m devtools.lab status
+	$(PYTHON) -m local_test.lab status
 
 dev-state:
-	$(PYTHON) -m devtools.lab state
+	$(PYTHON) -m local_test.lab state
 
 dev-seed-workers:
-	$(PYTHON) -m devtools.lab seed-workers
+	$(PYTHON) -m local_test.lab seed-workers
 
 dev-seed-jobs:
-	$(PYTHON) -m devtools.lab seed-jobs
+	$(PYTHON) -m local_test.lab seed-jobs
 
 dev-heartbeats:
-	$(PYTHON) -m devtools.lab heartbeat --loop
+	$(PYTHON) -m local_test.lab heartbeat --loop
 
 check-engines:
-	$(PYTHON) -m devtools.engines
+	$(PYTHON) -m local_test.engines
 
 test-scheduler:
-	$(PYTHON) -m devtools.lab scenario all $(CONFIRM)
+	$(PYTHON) -m local_test.lab scenario all $(CONFIRM)
 
 test-scheduler-basic:
-	$(PYTHON) -m devtools.lab scenario basic $(CONFIRM)
+	$(PYTHON) -m local_test.lab scenario basic $(CONFIRM)
 
 test-scheduler-concurrency:
-	$(PYTHON) -m devtools.lab scenario concurrency $(CONFIRM)
+	$(PYTHON) -m local_test.lab scenario concurrency $(CONFIRM)
 
 examples-check:
-	$(PYTHON) -m devtools.examples check
+	$(PYTHON) -m local_test.examples check
 
 examples-build-podman:
-	$(PYTHON) -m devtools.examples build --engine podman
+	$(PYTHON) -m local_test.examples build --engine podman
 
 examples-build-docker:
-	$(PYTHON) -m devtools.examples build --engine docker
+	$(PYTHON) -m local_test.examples build --engine docker
 
 .PHONY: examples-run-podman check-container-limits dev-real-worker test-real-worker
 examples-run-podman:
-	$(PYTHON) -m devtools.examples run --engine podman
+	$(PYTHON) -m local_test.examples run --engine podman
 
 check-container-limits:
-	$(PYTHON) -m devtools.examples limits --engine podman
+	$(PYTHON) -m local_test.examples limits --engine podman
 
 dev-real-worker:
-	$(PYTHON) -m devtools.real_worker start
+	$(PYTHON) -m local_test.real_worker start
 
 test-real-worker:
-	$(PYTHON) -m devtools.real_worker test
+	$(PYTHON) -m local_test.real_worker test
+
+# Recipe lines (not prerequisites) keep each aggregate ordered under make -j.
+.PHONY: test-local-runtime test-local-assignment test-local
+test-local-runtime:
+	@echo "Requires usable Podman CLI/API and local images; see local_test/README.md for setup."
+	$(PYTHON) -m local_test.engines --engine podman --require
+	$(MAKE) examples-check
+	$(MAKE) examples-run-podman
+	$(MAKE) check-container-limits
+
+test-local-assignment:
+	@echo "Requires make dev-up and a healthy make dev-real-worker in separate terminals; inspect with make dev-state."
+	$(MAKE) dev-status
+	$(MAKE) test-real-worker
+
+test-local:
+	$(MAKE) test-local-runtime
+	$(MAKE) test-local-assignment
+
+# Phase 5 is explicit: unlike assignment diagnostics, completed executions release reservations.
+.PHONY: dev-work-once test-execution
+dev-work-once:
+	$(PYTHON) -m local_test.real_worker work-once
+
+test-execution:
+	$(PYTHON) -m local_test.execution

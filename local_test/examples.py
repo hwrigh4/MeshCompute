@@ -49,7 +49,7 @@ def main():
         source_check()
         return
     if args.action in ("run", "limits"):
-        from devtools.container_checks import main_check
+        from local_test.container_checks import main_check
         main_check(args.action, args.engine)
         return
     if not shutil.which(args.engine):

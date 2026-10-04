@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Integer, UniqueConstraint, func
+from sqlalchemy import Boolean, String, CheckConstraint, DateTime, Enum, ForeignKey, Integer, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.schemas.states import AttemptState
@@ -12,6 +12,8 @@ class JobAttempt(Base):
     __tablename__ = "job_attempts"
     __table_args__ = (
         UniqueConstraint("job_id", "attempt_number", name="uq_job_attempt_number"),
+        CheckConstraint("container_engine IS NULL OR container_engine IN ('podman', 'docker')", name="ck_attempt_engine"),
+        CheckConstraint("octet_length(stdout_tail) <= 65536 AND octet_length(stderr_tail) <= 65536", name="ck_attempt_log_bytes"),
         CheckConstraint("attempt_number >= 1", name="ck_attempt_number_positive"),
     )
 
@@ -26,3 +28,10 @@ class JobAttempt(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    container_engine: Mapped[str | None] = mapped_column(String(16))
+    exit_code: Mapped[int | None] = mapped_column(Integer)
+    failure_reason: Mapped[str | None] = mapped_column(String(64))
+    stdout_tail: Mapped[str | None] = mapped_column(String(65536))
+    stderr_tail: Mapped[str | None] = mapped_column(String(65536))
+    stdout_truncated: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    stderr_truncated: Mapped[bool] = mapped_column(Boolean, server_default="false")

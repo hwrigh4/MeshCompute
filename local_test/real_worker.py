@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from controller.models.worker import Worker
 from controller.services.worker_health import worker_status
-from devtools.lab import Lab, LabError, REAL_STATE_FILE, STATE_DIR
+from local_test.lab import Lab, LabError, REAL_STATE_FILE, STATE_DIR
 from worker.config import WorkerSettings
 from worker.agent.claim import ClaimFailed, claim_once
 from worker.executors.container import ContainerExecutor
@@ -65,7 +65,7 @@ def identity(lab, register=False):
     return w
 
 
-def start(lab):
+def start(lab, work_once=False):
     with lock_file("real-worker.lock") as fd:
         if not acquire(fd):
             raise LabError("A helper-managed real worker is already running in this checkout; stop it first")
@@ -88,12 +88,12 @@ def start(lab):
         w = identity(lab, register=True)
         env.update(MESHCOMPUTE_WORKER_ID=w["id"], MESHCOMPUTE_WORKER_TOKEN=w["token"])
         print(f"Real worker {w['id']}: requested contribution {settings.cpu_limit} CPU / "
-              f"{settings.memory_limit_mb} MiB; engine={settings.container_engine}. Ctrl-C stops heartbeats.", flush=True)
+              f"{settings.memory_limit_mb} MiB; engine={settings.container_engine}. Ctrl-C stops this agent.", flush=True)
         lab.close()
         # Replace the helper with the actual production entry point. Preserve only
         # this advisory lock across exec; credentials travel in environment only.
         os.set_inheritable(fd, True)
-        os.execve(sys.executable, [sys.executable, "-m", "worker.main"], env)
+        os.execve(sys.executable, [sys.executable, "-m", "worker.main", *(["work-once"] if work_once else [])], env)
 
 
 def verify(lab):
@@ -154,7 +154,7 @@ def verify(lab):
             lab.print_state()
             raise LabError("Assignment validation failed; results preserved. Do not retry blindly; inspect make dev-state")
         print(f"PASS job {job['id']}: RUNNING; attempt {assignment['attempt_id']}: LEASED; reserved 0.5 CPU / 128 MiB")
-        print("Assignment validated; container execution remains Phase 5.")
+        print("Assignment validated; this diagnostic does not execute containers. Use make test-execution for Phase 5.")
         print("Results preserved. Stopping the agent does not release reservations; reruns require an explicit clean lab.")
 
 
@@ -167,14 +167,14 @@ def inspect_failure(lab):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["start", "test"])
+    parser.add_argument("action", choices=["start", "test", "work-once"])
     args = parser.parse_args()
     lab = None
     try:
         lab = Lab(state_file=REAL_STATE_FILE)
         lab.request("GET", "/health")
-        if args.action == "start":
-            start(lab)
+        if args.action in ("start", "work-once"):
+            start(lab, work_once=args.action == "work-once")
         else:
             verify(lab)
     except LabError as exc:

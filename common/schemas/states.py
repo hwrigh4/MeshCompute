@@ -20,3 +20,7 @@ class JobState(StrEnum):
 
 class AttemptState(StrEnum):
     LEASED = "LEASED"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"

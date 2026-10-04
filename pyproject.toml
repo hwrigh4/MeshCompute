@@ -23,4 +23,4 @@ dependencies = [
 mesh-worker = "worker.main:main"
 
 [tool.setuptools.packages.find]
-include = ["controller*", "common*", "worker*", "cli*"]
+include = ["controller*", "common*", "worker*", "cli*", "local_test*"]

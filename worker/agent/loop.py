@@ -20,7 +20,7 @@ class HeartbeatRejected(RuntimeError):
     """A permanent controller response that requires operator intervention."""
 
 
-async def run_agent(settings: WorkerSettings, executor: Executor) -> None:
+async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio.Event | None = None) -> None:
     psutil.cpu_percent(interval=None)  # Prime the utilization sample.
     agent_version = version("meshcompute")
     async with httpx.AsyncClient(
@@ -44,6 +44,8 @@ async def run_agent(settings: WorkerSettings, executor: Executor) -> None:
                     f"v1/workers/{settings.id}/heartbeat", json=payload.model_dump(mode="json"),
                 )
                 response.raise_for_status()
+                if ready is not None:
+                    ready.set()
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status not in (408, 429) and not 500 <= status < 600:

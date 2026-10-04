@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import update
 
 from controller.models.worker import Worker
-from devtools.lab import LabError
+from local_test.lab import LabError
 
 
 def check(condition, message):

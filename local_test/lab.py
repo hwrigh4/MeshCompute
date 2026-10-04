@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from common.schemas.attempts import AttemptView
 from common.schemas.jobs import JobView
 from common.schemas.assignments import WorkAssignment
 from common.schemas.workers import WorkerHeartbeat
@@ -157,8 +158,8 @@ class Lab:
                        for w in session.scalars(select(Worker).order_by(Worker.name, Worker.id))]
             jobs = [JobView.model_validate(j).model_dump(mode="json")
                     for j in session.scalars(select(Job).order_by(Job.created_at, Job.id))]
-            attempts = [dict(row._mapping) for row in session.execute(select(
-                JobAttempt.id, JobAttempt.job_id, JobAttempt.worker_id, JobAttempt.attempt_number, JobAttempt.state))]
+            attempts = [AttemptView.model_validate(a).model_dump(mode="json")
+                        for a in session.scalars(select(JobAttempt))]
             allocations = [dict(row._mapping) for row in session.execute(select(
                 WorkerAllocation.worker_id, WorkerAllocation.job_attempt_id,
                 WorkerAllocation.cpu_reserved, WorkerAllocation.memory_reserved_mb))]
@@ -259,7 +260,7 @@ def main():
         elif args.action == "submit":
             print(json.dumps(lab.submit(args.name, args.cpu, args.memory, args.image), indent=2))
         elif args.action == "scenario":
-            from devtools.scenarios import run
+            from local_test.scenarios import run
             run(lab, args.name, args.yes)
     except LabError as exc:
         raise SystemExit(str(exc)) from None

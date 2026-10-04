@@ -5,13 +5,18 @@ is the product and architecture source of truth.
 
 Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeats,
 Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
-assignment with resource reservations. No workloads are executed yet.
+assignment with resource reservations. Phase 5 adds restricted container execution,
+bounded results, and atomic reservation release through `mesh-worker work-once`.
 
 The Phase 4.5 [local functional lab](docs/development.md) adds Make commands,
 simulated logical workers, repeatable scheduler/concurrency scenarios, state
-inspection, real-engine diagnostics, and buildable OCI examples. Start with
-`make dev-up`; in another terminal use `make test-scheduler` (destructive local
-reset confirmation required). Phase 5 execution remains unimplemented.
+inspection, real-engine diagnostics, and buildable OCI examples, organized under
+[local_test/](local_test/README.md). The main validation command is `make test-local`;
+follow the lab's three-terminal setup and build example images explicitly first.
+`make test-scheduler` remains separate and requires a destructive local reset
+confirmation. For real end-to-end execution, use `make test-execution`; it runs
+its own one-shot worker and does not require the separate heartbeat terminal.
+See the [Phase 5 workflow](docs/development.md#phase-5-container-execution).
 
 ## Run locally
 
@@ -123,7 +128,7 @@ errors (including 400, 401, 403, 404, and 422) stop the agent with a nonzero exi
 and a concise configuration/authentication/protocol error. Logs omit response
 bodies and credentials. Redirects are not followed and stop the agent too. SIGINT/SIGTERM cancels
 in-flight work and closes HTTP clients cleanly. Stopping the agent lets its
-heartbeat expire; no execution or preemption is involved.
+heartbeat expire. This default heartbeat-only mode never claims or executes work.
 
 The payload and worker listing keep `resources`, `telemetry`, and `executors`
 separate. Resource fields include:
@@ -137,8 +142,9 @@ separate. Resource fields include:
 Controller responses derive reserved values from PostgreSQL `worker_allocations`;
 allocatable values are contribution minus reservations, floored at zero.
 Heartbeat resource fields describe the worker's local view and never overwrite
-the controller's ledger. The current agent still reports zero local reservations
-because it executes no workloads. Capacity is independent of CPU usage or available memory.
+the controller's ledger. Heartbeats do not maintain a second local allocation
+ledger; the controller remains authoritative, including during `work-once`.
+Capacity is independent of CPU usage or available memory.
 Telemetry reports `cpu_usage_percent`, `load_1m` when available, and
 `memory_available_mb`. CPU architecture is reported separately.
 
@@ -151,7 +157,7 @@ creating containers. A successful probe does not guarantee a future workload's s
 
 Podman's Docker-compatible API allows the same read-only probe for both engines.
 The default Podman socket targets the current user's rootless service; rootless
-Podman is the preferred direction for future execution. The agent does not install
+Podman is preferred for execution. The agent does not install
 Podman, start its service, or change system configuration. See the
 [Podman API service documentation](https://docs.podman.io/en/latest/markdown/podman-system-service.1.html)
 for socket setup. A different socket can be configured explicitly.
@@ -337,8 +343,10 @@ attempt-number unique index also covers lookups by job ID.
 
 In Phase 4, `RUNNING` means assigned and attempt `LEASED` means reserved. Job and
 attempt start timestamps, attempt completion, and lease expiration remain null.
-No container is launched, and there is no lease renewal/expiry, resource release,
-retry, or recovery. Reservations persist across controller and agent restarts.
+A diagnostic `claim` still launches no container. Phase 5 `work-once` adds
+execution and result-driven resource release. Neither path renews/expires leases,
+retries jobs, or recovers disappeared workers. Reservations persist across
+controller and agent restarts until a terminal result is recorded.
 Reducing contribution below existing reservations leaves zero allocatable capacity
 and blocks further claims; it does not preempt or release existing assignments.
 
@@ -346,15 +354,16 @@ For a local smoke check, register two logical workers, advertise 2 CPU/4096 MiB
 and 4 CPU/8192 MiB, submit fitting and oversized jobs, and invoke claims using
 each worker's token. Inspect `/v1/workers` for controller-side reserved/allocatable
 resources and `/v1/jobs/{id}` for state. Multiple logical workers may run on one
-development machine with independent IDs and environment settings. Engine APIs
-are used only for availability detection; a local simulation may also send
-authenticated heartbeats directly.
+development machine with independent IDs and environment settings. These simulated
+checks use engine APIs only for availability detection; a local
+simulation may also send authenticated heartbeats directly. Phase 5 execution
+checks instead launch real restricted containers.
 
-Verify migration `0004` on a disposable database:
+Historical Phase 4 migration check, on a disposable database without execution
+history (Phase 5 migration instructions are in the development guide):
 
 ```bash
-alembic upgrade head
-alembic check
+alembic upgrade 0004
 alembic downgrade 0003
 alembic upgrade head
 alembic check

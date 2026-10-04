@@ -1,10 +1,19 @@
-# Local functional lab (Phase 4.5)
+# Local functional lab (Phases 4.5 and 5)
 
-This is a disposable Linux development lab for the Phase 4 controller. Requests
-use the real APIs, authentication, PostgreSQL transactions, and allocation ledger.
-Logical workers simulate hardware and engine capabilities. No MeshCompute worker
-pulls images, launches workloads, completes jobs, releases allocations, or processes
-leases. The helpers are not production commands or a formal unit-test suite.
+This Linux development lab uses real APIs, authentication, PostgreSQL transactions,
+and the allocation ledger. Phase 4.5 scheduler fixtures simulate worker hardware;
+manual runtime checks validate real engines independently. Phase 5 execution checks
+run the production worker, execute real containers, record results, and release
+allocations. Helpers are local functional tests, not a broad unit-test framework.
+
+The repo-root [local_test/ package](../local_test/README.md) is the home for these
+functional tests. Workload sources and Containerfiles stay in `examples/`;
+credentials and locks stay in `.meshcompute-lab/`. Existing saved identities and
+state files remain compatible; moving the helpers does not require a reset.
+Run helpers from the repository root using the project environment (editable
+installation recommended); this lab needs the checkout's examples and migrations.
+`make test-local` retains the Phase 4.5 runtime/assignment aggregate.
+`make test-execution` validates the Phase 5 end-to-end path; see its workflow below.
 
 ## Requirements and startup
 
@@ -89,7 +98,8 @@ Inspection prints JSON grouped into workers, jobs, attempts, and allocations:
 - Workers: effective state, capacity/contribution/reservations/allocatable CPU and
   memory, generic executor capabilities, engine metadata, and last heartbeat.
 - Jobs: state, CPU/memory requests, workload metadata, and timestamps.
-- Attempts: IDs, worker/job IDs, attempt number, and state.
+- Attempts: IDs, worker/job IDs, attempt number, engine, state, timestamps, exit
+  code, failure reason, bounded stdout/stderr tails, and truncation flags.
 - Allocations: worker/attempt IDs and reserved CPU/memory.
 
 It reads explicit response/diagnostic fields, never credentials or token hashes.
@@ -115,11 +125,11 @@ rejected, and repeated job submission creates additional jobs.
 Custom fixtures can differ from the physical host:
 
 ```bash
-.venv/bin/python -m devtools.lab register large --cpu 32 --memory 65536 --engine both
-.venv/bin/python -m devtools.lab register paused --cpu 4 --memory 8192 --engine podman --state PAUSED
-.venv/bin/python -m devtools.lab submit --name small --cpu 0.5 --memory 256
-.venv/bin/python -m devtools.lab heartbeat A
-.venv/bin/python -m devtools.lab claim A
+.venv/bin/python -m local_test.lab register large --cpu 32 --memory 65536 --engine both
+.venv/bin/python -m local_test.lab register paused --cpu 4 --memory 8192 --engine podman --state PAUSED
+.venv/bin/python -m local_test.lab submit --name small --cpu 0.5 --memory 256
+.venv/bin/python -m local_test.lab heartbeat A
+.venv/bin/python -m local_test.lab claim A
 make dev-state
 ```
 
@@ -145,14 +155,14 @@ reconciliation or recovery.
 ## Functional scenarios
 
 Stop background agents and heartbeat loops before running these commands. Each
-selected scenario starts with a full explicit development reset, because Phase 4
-allocations never expire or complete:
+selected scheduler scenario starts with a full explicit development reset, because
+its claim-only allocations never expire or complete:
 
 ```bash
 make test-scheduler YES=1
 make test-scheduler-basic YES=1
 make test-scheduler-concurrency YES=1
-.venv/bin/python -m devtools.lab scenario stale --yes
+.venv/bin/python -m local_test.lab scenario stale --yes
 ```
 
 Omit `YES=1`/`--yes` for an interactive reset confirmation. Failures exit nonzero
@@ -175,14 +185,14 @@ no SQLite substitute, mocked scheduler, or production validation bypass is used.
 
 No scenario fabricates completion, allocation release, or lease expiry. The stale
 scenario's SQL timestamp edit is fixture setup only; no new production endpoint
-is exposed. `RUNNING` still means assigned, not executing.
+is exposed. Job `RUNNING` means assigned; attempt `RUNNING` means execution was authorized.
 
 ## Real Podman and Docker checks
 
 ```bash
 make check-engines
-.venv/bin/python -m devtools.engines --engine podman --require
-.venv/bin/python -m devtools.engines --engine docker --require
+.venv/bin/python -m local_test.engines --engine podman --require
+.venv/bin/python -m local_test.engines --engine docker --require
 ```
 
 The report distinguishes installed binaries/version, CLI runtime communication,
@@ -225,7 +235,7 @@ export MESHCOMPUTE_WORKER_PODMAN_SOCKET=/run/user/1000/podman/podman.sock
 export MESHCOMPUTE_WORKER_DOCKER_SOCKET=/run/user/1000/docker.sock
 make check-engines
 # Or a one-off diagnostic:
-.venv/bin/python -m devtools.engines --engine docker --socket /var/run/docker.sock
+.venv/bin/python -m local_test.engines --engine docker --socket /var/run/docker.sock
 ```
 
 Docker's `/info` reports rootless mode through `SecurityOptions`; see the
@@ -254,13 +264,13 @@ Build and validate sources:
 make examples-check          # bounded host Python runs; does not validate OCI builds
 make examples-build-podman   # all six images
 make examples-build-docker   # all six images
-.venv/bin/python -m devtools.examples build --engine podman --name success
+.venv/bin/python -m local_test.examples build --engine podman --name success
 podman build -f examples/success/Containerfile -t localhost/meshcompute-success:dev examples/success
 docker build -f examples/success/Containerfile -t localhost/meshcompute-success:dev examples/success
 ```
 
-Build commands may fetch the base image using the developer's engine; workers do
-not pull anything. Images are tagged `localhost/meshcompute-<example>:dev`. Missing
+Build commands may fetch the base image using the developer's engine. Phase 5
+workers use a local image first, and attempt a noninteractive pull only if missing. Images are tagged `localhost/meshcompute-<example>:dev`. Missing
 engines produce a clear pending message and nonzero build exit, not a simulated
 build success. Sources can still be checked without an engine.
 
@@ -277,7 +287,8 @@ podman run --rm --network=none --cpus=1 --memory=128m --pids-limit=64 \
 The same commands work with `docker` in place of `podman` when supported. The
 failure image should exit 7, not 0. Keep memory requests below the manual engine
 limit. These are bounded development examples, not host-exhaustion tests. The
-formal MeshCompute sandbox, launch, timeout, logs, and completion path remain Phase 5.
+MeshCompute execution, timeout, output, and completion path is tested separately
+with the Phase 5 commands below.
 
 ## Later physical-device testing
 
@@ -290,32 +301,65 @@ separate; do not run destructive lab helpers against that environment.
 
 ## Repeatable real-environment validation
 
-These checks extend Phase 4.5 only. Use the local PostgreSQL/controller and a
+The following commands retain the Phase 4.5 diagnostic behavior. Use the local PostgreSQL/controller and a
 working Podman installation with the six local example images. Run sequentially
 on small development machines; the defaults suit a 4-CPU Chromebook with limited
 available RAM and no swap. No helper installs software or changes engine/system
 configuration. Existing loopback-only controller/database guards still apply.
 
-Recommended order (preserve existing `.env` and database settings):
+Before testing, build missing example images explicitly with
+`make examples-build-podman`. Preserve existing `.env` and database settings.
+The primary three-terminal workflow is:
 
 ```bash
 # Terminal 1: leave the controller running
-make dev-controller              # or make dev-up to also start Compose PostgreSQL
+make dev-up COMPOSE=podman-compose
 
-# Terminal 2: inspect before changing anything
-make dev-status
-make dev-state
-make check-engines
-make examples-build-podman       # only if the local images need building
-make examples-run-podman
-make check-container-limits
-make dev-real-worker             # foreground actual agent; leave running
+# Terminal 2: after the controller is ready, leave the actual agent running
+make dev-real-worker
 
-# Terminal 3: after its first heartbeat (normally within 5 seconds)
+# Terminal 3: wait for the first HEALTHY heartbeat (normally within 5 seconds)
 make dev-state
-make test-real-worker
+make test-local
 make dev-state                   # results remain persisted
 ```
+
+If PostgreSQL is already running locally, Terminal 1 can use `make dev-controller`.
+`test-local` runs `test-local-runtime` then `test-local-assignment`, in order:
+
+| Aggregate | Ordered checks |
+| --- | --- |
+| `make test-local-runtime` | Required Podman API diagnostic, example source checks, six restricted Podman runs, cgroup limits probe |
+| `make test-local-assignment` | Controller/database status, one real-worker assignment validation |
+
+Each aggregate stops on the first failure, including under `make -j`. They never
+install software, build or pull images, start persistent services, or reset data.
+Destructive `test-scheduler*` scenarios are excluded and retain their explicit
+reset workflow. Run only one aggregate at a time; independently requesting
+multiple Make targets with `-j` can still run those separate targets concurrently.
+
+For diagnosis, each existing command is still available:
+
+```bash
+make check-engines                # report both engines; PENDING is not PASS
+.venv/bin/python -m local_test.engines --engine podman --require
+make examples-check
+make examples-run-podman
+make check-container-limits
+make dev-status
+make dev-state
+make test-real-worker             # one-shot: requires a clean lab
+```
+
+The runtime aggregate is repeatable without changing scheduler state. The
+assignment aggregate (and thus `test-local`) needs a clean lab on rerun: Phase 4
+diagnostic reservations never expire or complete. Inspect results, stop agents, and use the
+explicit reset procedure below only when existing data can be deleted.
+
+These helpers currently target a local controller. Future remote functional
+testing requires its own explicit configuration and safeguards; the existing
+localhost-only controller/database guards remain in force. No remote test
+framework is provided.
 
 For Podman, enable its rootless API socket explicitly as described above if it
 is inactive. Both the CLI and API should work: API probe success alone does not
@@ -358,8 +402,8 @@ invalid output, mismatches, and unsupported environments fail nonzero. This
 validates **configured kernel limits**, not a stress test or comprehensive
 isolation audit. The helper applies the same timeouts and cleanup policy.
 
-These manual-engine runs are separate from MeshCompute execution. No worker
-launches a container, pulls an image, or reports completion.
+These manual-engine runs are separate from MeshCompute execution. They do not
+submit jobs or exercise worker result reporting.
 
 ### Real heartbeat agent and one explicit assignment
 
@@ -404,7 +448,7 @@ assignment plus the database's RUNNING job, LEASED attempt number 1, and matchin
 allocation. Expected final message:
 
 ```text
-Assignment validated; container execution remains Phase 5.
+Assignment validated; this diagnostic does not execute containers. Use make test-execution for Phase 5.
 ```
 
 Submission/claim failures are never automatically retried. An ambiguous claim
@@ -413,7 +457,7 @@ triggers persisted-state inspection; if inspection is unavailable, run
 queued or assigned job. This is diagnostics, not reconciliation.
 
 Results remain for inspection. A second test run intentionally refuses the dirty
-lab: Phase 4 allocations never expire or complete. **Stopping the real worker
+lab: claim-only allocations never expire or complete. **Stopping the real worker
 does not release reservations.** To repeat, first inspect results, stop the worker
 with Ctrl-C in Terminal 2, then explicitly run `make dev-reset` only if all local
 work can be deleted. Reset removes simulated and real credential files. Restart
@@ -424,3 +468,174 @@ Never reset automatically to resolve a configuration mismatch.
 
 For shutdown, Ctrl-C the worker and controller in their respective terminals;
 `make dev-down` optionally stops Compose PostgreSQL while retaining its volume.
+
+
+## Phase 5 container execution
+
+Keep PostgreSQL and the controller running in Terminal 1. Build the six example
+images explicitly if they are missing. Stop `dev-real-worker` in Terminal 2:
+`work-once` sends and maintains its own real heartbeats, waits for its first
+confirmed heartbeat, then claims at most one job. It exits cleanly on no work.
+Do not run competing submitters/claimers while validating a local lab.
+
+```bash
+# Terminal 1
+make dev-up COMPOSE=podman-compose
+
+# Terminal 2: no separate heartbeat agent needed
+make examples-build-podman        # explicit setup, only if images are missing
+make dev-status
+make dev-state                   # check for existing queued/running jobs/reservations
+make test-execution
+make dev-state                   # terminal results remain available
+```
+
+`make test-execution` runs sequentially with 0.5 CPU / 128 MiB requests (64 MiB
+for the memory-over-limit case) on a real worker contributing 1 CPU / 256 MiB.
+It uses the existing protected real-worker identity and helper locks. It refuses
+active jobs/reservations and a running heartbeat helper, never resets data, and
+checks images before submitting. Terminal history is allowed: successful runs
+can be repeated without reset. An old assignment-only test leaves a reservation;
+inspect it and choose a separate lab, or explicitly reset disposable data after
+stopping agents. **Stopping a heartbeat agent does not release reservations.**
+
+The scenarios cover success, intentional exit 7 with stderr, sleep timeout, CPU
+burn, memory hold, bounded memory exhaustion, deterministic Monte Carlo output,
+actual cgroup v2/security settings, exact argv, and separate 64 KiB output tails.
+Each result must have one attempt even with `max_attempts=3`, the expected engine,
+terminal job/attempt, no allocation, and no container. CPU/memory scenarios inspect
+live engine settings; the kernel probe also checks effective capabilities,
+no-new-privileges, seccomp, UID/GID, network interfaces, CPU/memory/PID/swap limits,
+and writable temporary paths. It is not a comprehensive isolation audit.
+Duplicate start/result reports and conflicting results are also checked.
+
+```bash
+# Diagnose one scenario, or explicitly select another available engine
+.venv/bin/python -m local_test.execution --scenario success --engine podman
+.venv/bin/python -m local_test.execution --scenario timeout --engine auto
+.venv/bin/python -m local_test.execution --engine docker
+make examples-build-docker        # separate explicit setup if needed
+```
+
+Expected output includes `PASS success: SUCCEEDED, engine=podman, ...` and
+`PASS timeout: TIMED_OUT, ...`; failure and memory-over scenarios correctly pass
+with a FAILED attempt. The CLI returns zero when a workload's terminal result
+was successfully recorded, including workload failure; operational/reporting
+failures return nonzero. The functional helper checks the expected outcome.
+
+To execute one manually submitted job using the local protected identity:
+
+```bash
+.venv/bin/python -m local_test.lab submit --name phase5-success --cpu 0.5 --memory 128
+make dev-work-once
+make dev-state
+# Use the attempt UUID printed by the worker/state inspection:
+curl http://127.0.0.1:8000/v1/attempts/ATTEMPT_UUID
+```
+
+`dev-work-once` defaults to Podman and 1 CPU / 256 MiB; the same explicit
+`MESHCOMPUTE_WORKER_*` contribution/engine overrides as `dev-real-worker` apply.
+The production command is `mesh-worker work-once` (or
+`.venv/bin/python -m worker.main work-once`) using existing worker ID/token and
+controller settings from its environment. Production stores no credentials.
+The default `mesh-worker` remains heartbeat-only; `mesh-worker claim` remains a
+single diagnostic claim without execution. Work is sequential; a Linux abstract
+socket prevents simultaneous work-once executors for one identity on one host.
+Do not share an identity across hosts or bypass helper locks.
+
+### Execution policy and limits
+
+The requester runtime remains `container`. `ContainerExecutor` selects the
+configured engine immediately before execution. `auto` prefers usable Podman,
+then Docker; explicit `podman`/`docker` never falls back. Adapters share a local
+Docker-compatible Unix API implementation; Podman's adapter also verifies its
+native capability sets. CLI contexts and host registry configuration are not
+passed to workloads. Existing local images are pinned by image ID. Missing images
+are pulled noninteractively with a 120-second overall acquisition deadline and
+bounded progress parsing. No registry credential protocol is added. Image-declared
+volumes are rejected to avoid unbounded anonymous storage.
+
+Every execution uses numeric UID/GID 65532:65532, no network, a read-only root,
+all capabilities dropped, no-new-privileges, 64 PIDs, the reserved CPU quota and
+memory in MiB, and memory+swap equal to memory (no extra swap). CPU uses a 100000
+microsecond period; nonrepresentable requests or quotas below the kernel's 1000
+microsecond minimum fail safely. Configuration is inspected before launch.
+Engine defaults for seccomp and SELinux/AppArmor remain enabled where available.
+No privileged mode, host namespace, host bind, device, socket, or host credential
+injection is offered. Image commands are replaced with the submitted argv exactly,
+without an implicit shell. Incompatible images fail instead of relaxing policy.
+
+`/tmp` and `/mesh/work` each have an isolated 16 MiB tmpfs with
+nosuid/nodev/noexec; shared memory is capped at 16 MiB. Memory cgroups also bound
+temporary RAM usage. Image healthchecks and container restart policies are disabled.
+There is no artifact persistence. Contribution settings configure the scheduler;
+Phase 5 applies each reservation to a container. Manual Podman limit checks remain
+an independent way to validate kernel enforcement. Containers are not a perfect
+security boundary, and provider hosts remain able to inspect workload data.
+
+Output is attached before launch with separate stdout/stderr, drained in small
+chunks, and retained as at most 64 KiB UTF-8 per stream. Invalid UTF-8 and NUL are
+replaced; truncation flags identify dropped bytes. Engine log persistence is
+disabled to prevent unbounded host log files. PostgreSQL/API enforce the same
+byte limit, and attempt mutation bodies are capped at 800 KiB before JSON parsing
+(to allow escaped JSON). No full log service is implemented.
+
+The execution deadline includes container start and running time. On expiry the
+worker requests a two-second stop grace, kills if still running, confirms exit,
+and removes the container. Engine operations have bounded timeouts. Cleanup checks
+the current attempt's ownership label and deletes by inspected container ID,
+including partial creation. A colliding existing name is never adopted or removed.
+Images are cached; no unrelated volumes, networks, or containers are pruned.
+
+### Result protocol and remaining limits
+
+Worker-authenticated endpoints use the existing worker ID and bearer token:
+
+- `POST /v1/workers/{worker_id}/attempts/{attempt_id}/start` with
+  `{"container_engine":"podman"}` authorizes LEASED → RUNNING and records start
+  timestamps. Repeating it with the same engine returns the existing timestamps.
+- `POST /v1/workers/{worker_id}/attempts/{attempt_id}/result` records state,
+  engine, exit code, stable failure reason, bounded output, and truncation flags.
+  The exact same terminal report is idempotent; conflicting outcomes or fields
+  return 409 without rewriting history.
+- `GET /v1/attempts/{attempt_id}` exposes result metadata and bounded output,
+  never worker credentials. Requester reads/submissions remain local-MVP APIs
+  without requester authentication; do not expose them to the internet.
+
+The container starts only after a confirmed start response. Start and result
+requests may retry the same payload up to three times on transient/ambiguous
+responses; claims and engine starts are never blindly retried. If ambiguity
+remains, the worker stops and requires inspection. No further job is claimed.
+
+Success maps to attempt/job SUCCEEDED. Nonzero exit maps to FAILED; timeout maps
+to attempt TIMED_OUT and job FAILED. Engine/image/policy failures can end a LEASED
+attempt as FAILED without start timestamps. Completion timestamps, both terminal
+states, and allocation deletion commit in **one PostgreSQL transaction**. Local
+container exit alone never releases a server reservation. Cleanup happens before
+result reporting; unresolved cleanup keeps the reservation and emits inspection
+guidance rather than assuming the workload is gone.
+
+Ctrl-C/SIGTERM during execution cleans up the current container and attempts a
+FAILED/WORKER_INTERRUPTED result. SIGKILL, host loss, unavailable engines, or
+unresolved controller communication can still leave a reservation stuck. No lease
+renewal/expiry, retry/requeue, reconciliation, provider preemption, or running-job
+cancellation is implemented. `max_attempts` remains stored but unused: even 3
+allows only this one Phase 5 attempt. Those recovery behaviors belong to Phase 6.
+For shutdown, stop the worker and controller with Ctrl-C, then optionally
+`make dev-down COMPOSE=podman-compose`; the database volume remains.
+
+### Phase 5 migration check
+
+Run this only on a separate disposable database, before creating execution history:
+
+```bash
+.venv/bin/python -m alembic upgrade head
+.venv/bin/python -m alembic check
+.venv/bin/python -m alembic downgrade 0004
+.venv/bin/python -m alembic upgrade head
+.venv/bin/python -m alembic check
+```
+
+Migration 0005 adds bounded attempt results without changing earlier migrations.
+Downgrade refuses non-LEASED attempt history because Phase 4 cannot represent it;
+never discard existing results automatically to make a migration check pass.
