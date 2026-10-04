@@ -98,5 +98,6 @@ test-local:
 dev-work-once:
 	$(PYTHON) -m local_test.real_worker work-once
 
+# Full Phase 5/5.1 suite; select individual scenarios through local_test.execution.
 test-execution:
 	$(PYTHON) -m local_test.execution

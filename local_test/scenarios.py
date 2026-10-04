@@ -128,7 +128,7 @@ def cancellation_race(lab):
         outcomes[state] += 1
         snapshot = lab.snapshot()
         attempts = [a for a in snapshot["attempts"] if str(a["job_id"]) == j["id"]]
-        allocations = [a for a in snapshot["allocations"] if a["job_attempt_id"] in {t["id"] for t in attempts}]
+        allocations = [a for a in snapshot["allocations"] if str(a["job_attempt_id"]) in {str(t["id"]) for t in attempts}]
         if state == "CANCELLED":
             check(assignment is None and cancel_status == 200 and not attempts and not allocations, "cancelled job also assigned")
         else:

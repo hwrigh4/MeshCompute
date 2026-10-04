@@ -120,3 +120,20 @@ separate heartbeat process is required. `max_attempts` does not cause retries.
 Inspect the printed attempt through `GET /v1/attempts/{id}` or `make dev-state`.
 See the [execution workflow and limits](../docs/development.md#phase-5-container-execution)
 for security policy, output limits, failure handling, migrations, and shutdown.
+
+
+Phase 5.1 adds exactly four scenarios to the same `make test-execution` suite:
+`image-failure`, `policy-rejection`, `oversized-result`, and `name-collision`.
+Run one with `python -m local_test.execution --scenario NAME`. Build the tiny
+rejected-volume fixture first with
+`python -m local_test.examples build --engine podman --name test-volume`
+(or use the normal full image-build command). The original six source/runtime
+checks remain unchanged.
+
+These prove real-engine acquisition failure and fail-closed policy rejection,
+HTTP 413 with unchanged assigned state, and preservation of an unrelated-name
+fixture. No controller result is fabricated: reservations are released by normal
+worker terminal reporting. The oversized-request check subsequently executes its
+success job; the collision fixture is removed only after preservation is proven.
+See [scenario details](../docs/development.md#phase-51-failure-path-checks) for
+expected states, real-engine versus fixture behavior, and cleanup.

@@ -7,10 +7,11 @@ import argparse
 import asyncio
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from sqlalchemy import select
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from common.schemas.attempts import AttemptView
 from controller.models.job_attempt import JobAttempt
+from local_test.execution_fixtures import FAILURE_REASONS, SCENARIOS as FIXTURE_SCENARIOS, run_assigned
 from local_test.lab import Lab, LabError, REAL_STATE_FILE
 from local_test.real_worker import acquire, identity, lock_file
 from worker.config import WorkerSettings
@@ -68,6 +70,10 @@ SCENARIOS.update({
     'kernel': ('success', [], 10, 128, 'SUCCEEDED', 0, 'kernel/security probe PASS'),
     'output': ('success', [], 10, 128, 'SUCCEEDED', 0, 'OUT_END'),
     'argv': ('success', [], 10, 128, 'SUCCEEDED', 0, 'argv PASS'),
+    'image-failure': (None, [], 10, 128, 'FAILED', None, None),
+    'policy-rejection': ('test-volume', [], 10, 128, 'FAILED', None, None),
+    'oversized-result': ('success', [], 10, 128, 'SUCCEEDED', 0, 'meshcompute example: success'),
+    'name-collision': ('success', [], 10, 128, 'FAILED', None, None),
 })
 
 
@@ -88,8 +94,12 @@ def run_scenarios(lab, selected, engine):
         backend = asyncio.run(selector.select())
         actual_engine, socket_path = backend.engine, backend.socket_path
         asyncio.run(backend.client.aclose())
-        with httpx.Client(transport=httpx.HTTPTransport(uds=socket_path), base_url='http://engine', timeout=5, trust_env=False) as api:
-            for name in {SCENARIOS[s][0] for s in selected}:
+        with socket.socket() as unavailable_registry, httpx.Client(transport=httpx.HTTPTransport(uds=socket_path), base_url='http://engine', timeout=5, trust_env=False) as api:
+            # Reserve a loopback port without listening: the real engine gets
+            # connection refused, with no DNS/external registry dependency.
+            unavailable_registry.bind(('127.0.0.1', 0))
+            missing_image = f'127.0.0.1:{unavailable_registry.getsockname()[1]}/meshcompute-unavailable-{uuid4().hex}:dev'
+            for name in {SCENARIOS[s][0] for s in selected} - {None}:
                 response = api.get('/images/' + f'localhost/meshcompute-{name}:dev' + '/json')
                 if response.status_code != 200:
                     raise LabError(f'Missing {name} image; run make examples-build-{actual_engine}. No test job submitted.')
@@ -103,13 +113,16 @@ def run_scenarios(lab, selected, engine):
                 image, args, timeout, memory, state, exit_code, marker = SCENARIOS[scenario]
                 job = lab.request('POST', '/v1/jobs', json={
                     'name': 'execution-' + scenario, 'runtime': 'container',
-                    'image': f'localhost/meshcompute-{image}:dev', 'command': COMMANDS.get(scenario, ['python', '/app/main.py', *args]),
+                    'image': missing_image if image is None else f'localhost/meshcompute-{image}:dev', 'command': COMMANDS.get(scenario, ['python', '/app/main.py', *args]),
                     'resources': {'cpu': 0.5, 'memory_mb': memory}, 'timeout_seconds': timeout, 'max_attempts': 3,
                 }).json()
                 # Refuse a concurrent submitter before invoking the single-claim CLI.
                 if any(j['id'] != job['id'] and j['state'] in ('QUEUED', 'RUNNING') for j in lab.snapshot()['jobs']):
                     raise LabError('Queue changed; no claim made. Stop other submitters and inspect state.')
-                process = subprocess.Popen([sys.executable, '-m', 'worker.main', 'work-once'], env=env)
+                command = [sys.executable, '-m', 'worker.main', 'work-once']
+                if scenario in FIXTURE_SCENARIOS:
+                    command = [sys.executable, '-m', 'local_test.execution', '--scenario', scenario, '--assigned-job', job['id']]
+                process = subprocess.Popen(command, env=env)
                 inspected = False
                 attempt = None
                 try:
@@ -159,7 +172,12 @@ def run_scenarios(lab, selected, engine):
                 assert result['state'] == state, result['failure_reason']
                 assert result['container_engine'] == actual_engine
                 assert final_job['state'] == ('SUCCEEDED' if state == 'SUCCEEDED' else 'FAILED')
-                assert result['started_at'] and result['completed_at'] and final_job['completed_at']
+                assert result['completed_at'] and final_job['completed_at']
+                if scenario in FAILURE_REASONS:
+                    assert result['started_at'] is None and final_job['started_at'] is None
+                    assert result['failure_reason'] == FAILURE_REASONS[scenario]
+                else:
+                    assert result['started_at'] and final_job['started_at']
                 if scenario == 'cpu':
                     from datetime import datetime
                     worker = next(x for x in lab.snapshot()['workers'] if str(x['id']) == w['id'])
@@ -184,7 +202,8 @@ def run_scenarios(lab, selected, engine):
                 assert api.get(f'/containers/meshcompute-{attempt_id}/json').status_code == 404
                 if scenario in ('cpu', 'memory'):
                     assert inspected, 'No running-container inspection obtained'
-                print(f'PASS {scenario}: {state}, engine={actual_engine}, attempt={attempt_id}; allocation/container removed', flush=True)
+                reason = f", reason={result['failure_reason']}" if scenario in FAILURE_REASONS else ''
+                print(f'PASS {scenario}: {state}{reason}, engine={actual_engine}, attempt={attempt_id}; allocation/container removed', flush=True)
     print('Execution validated; results retained. No retry, lease expiry, or recovery implemented.')
 
 
@@ -192,11 +211,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--engine', choices=['auto', 'podman', 'docker'], default=os.environ.get('MESHCOMPUTE_WORKER_CONTAINER_ENGINE', 'auto'))
     parser.add_argument('--scenario', choices=['all', *SCENARIOS], default='all')
+    parser.add_argument('--assigned-job', type=UUID, help=argparse.SUPPRESS)
     args = parser.parse_args()
     lab = None
     try:
         lab = Lab(state_file=REAL_STATE_FILE)
         lab.request('GET', '/health')
+        if args.assigned_job is not None:
+            if args.scenario not in FIXTURE_SCENARIOS:
+                raise LabError('Assigned fixture requires a Phase 5.1 scenario')
+            asyncio.run(run_assigned(lab, args.scenario, args.assigned_job))
+            return
         run_scenarios(lab, list(SCENARIOS) if args.scenario == 'all' else [args.scenario], args.engine)
     except (LabError, AssertionError) as exc:
         raise SystemExit(f'FAIL {exc}; results preserved, inspect make dev-state') from None

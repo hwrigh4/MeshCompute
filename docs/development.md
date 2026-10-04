@@ -245,8 +245,8 @@ is performed by diagnostics. Engine absence does not block simulated scenarios.
 
 ## Example OCI workloads
 
-Each example has an independent `Containerfile` and Python source. Images use
-`python:3.12-slim`, run as an unprivileged numeric user, and require no Python
+Each of the six runnable examples has a `Containerfile` and Python source. Their
+images use `python:3.12-slim`, run as an unprivileged numeric user, and require no Python
 packages beyond the standard library. Build contexts contain only the example.
 
 | Example | Default behavior / configuration |
@@ -262,8 +262,8 @@ Build and validate sources:
 
 ```bash
 make examples-check          # bounded host Python runs; does not validate OCI builds
-make examples-build-podman   # all six images
-make examples-build-docker   # all six images
+make examples-build-podman   # six workloads plus the test-only volume fixture
+make examples-build-docker   # same workloads and test fixture, using Docker
 .venv/bin/python -m local_test.examples build --engine podman --name success
 podman build -f examples/success/Containerfile -t localhost/meshcompute-success:dev examples/success
 docker build -f examples/success/Containerfile -t localhost/meshcompute-success:dev examples/success
@@ -542,6 +542,42 @@ The default `mesh-worker` remains heartbeat-only; `mesh-worker claim` remains a
 single diagnostic claim without execution. Work is sequential; a Linux abstract
 socket prevents simultaneous work-once executors for one identity on one host.
 Do not share an identity across hosts or bypass helper locks.
+
+### Phase 5.1 failure-path checks
+
+`make test-execution` includes four additional scenarios without replacing the
+existing ten. Build the test-only metadata image explicitly before the full run:
+
+```bash
+.venv/bin/python -m local_test.examples build --engine podman --name test-volume
+# Or build all six workloads plus this fixture with make examples-build-podman.
+.venv/bin/python -m local_test.execution --scenario image-failure
+.venv/bin/python -m local_test.execution --scenario policy-rejection
+.venv/bin/python -m local_test.execution --scenario oversized-result
+.venv/bin/python -m local_test.execution --scenario name-collision
+```
+
+All four use a real local controller/PostgreSQL and real worker heartbeat/claim.
+The helper checks the initial LEASED attempt and allocation before invoking the
+unchanged production execution coordinator in a bounded child process. This
+allows fixture setup between claim and execution; no engine or result is mocked.
+Use `--engine podman` or `--engine docker` to select an available local engine.
+
+| Scenario | Fixture and assertion | End state / cleanup |
+| --- | --- | --- |
+| `image-failure` | A missing image references a randomly reserved, non-listening loopback port. The real engine's acquisition fails quickly without external registry/DNS dependencies. | FAILED / IMAGE_PULL_FAILED; both start timestamps null, allocation removed, no container. |
+| `policy-rejection` | `localhost/meshcompute-test-volume:dev` is a tiny `FROM scratch` image declaring `/data` as a volume. Its metadata exists in the real engine; the worker must reject it before launch. | FAILED / SECURITY_POLICY_UNSUPPORTED; no start timestamps, allocation or container. Security policy stays unchanged. |
+| `oversized-result` | The assigned worker's authenticated result request contains more than the 800 KiB body limit. HTTP 413, rather than field-validation 422, must leave the entire job, attempt and allocation unchanged. The body is never printed. | At the assertion: still LEASED, with the original allocation and timestamps. Then the real success workload executes normally to finish SUCCEEDED and release the reservation; no artificial release. |
+| `name-collision` | Direct fixture setup creates an unstarted container with the expected attempt name but only a unique test-ownership label. After worker execution, its ID, configuration and state must still match. | FAILED / CONTAINER_CREATE_FAILED; valid terminal result recorded and allocation removed. Only after proving preservation does the harness remove its fixture by ID and verified test label, independently of production cleanup. |
+
+Image failure, policy rejection and collision validate real engine interactions;
+the 413 assertion validates controller/API behavior (its subsequent success run
+uses the real engine). Every scenario checks exactly one attempt despite
+`max_attempts=3`, a clean child exit, terminal results, and final container cleanup.
+They reuse existing credentials, locks, local guards, state inspection and failure
+handling. The existing cancellation-race check normalizes snapshot UUIDs before
+matching allocations; this corrects a test-only false failure when a claim wins.
+Tests never build images or reset data automatically. Results remain available for inspection; successful runs can be repeated without a reset.
 
 ### Execution policy and limits
 

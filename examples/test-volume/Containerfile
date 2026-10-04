@@ -1,0 +1,4 @@
+# Test-only metadata fixture: MeshCompute must reject this before container creation.
+FROM scratch
+VOLUME ["/data"]
+CMD ["/must-never-execute"]

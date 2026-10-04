@@ -8,6 +8,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ("success", "failure", "sleep", "cpu-burn", "memory-hold", "monte-carlo")
+TEST_IMAGES = ("test-volume",)
 
 
 def source_check():
@@ -43,7 +44,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["check", "build", "run", "limits"])
     parser.add_argument("--engine", choices=["podman", "docker"], default="podman")
-    parser.add_argument("--name", choices=NAMES, help="build one example instead of all")
+    parser.add_argument("--name", choices=NAMES + TEST_IMAGES, help="build one example instead of all")
     args = parser.parse_args()
     if args.action == "check":
         source_check()
@@ -54,7 +55,7 @@ def main():
         return
     if not shutil.which(args.engine):
         raise SystemExit(f"PENDING: {args.engine} is not installed; OCI builds were not performed")
-    for name in ([args.name] if args.name else NAMES):
+    for name in ([args.name] if args.name else NAMES + TEST_IMAGES):
         context = ROOT / "examples" / name
         subprocess.run([args.engine, "build", "-f", str(context / "Containerfile"),
                         "-t", f"localhost/meshcompute-{name}:dev", str(context)], check=True)
