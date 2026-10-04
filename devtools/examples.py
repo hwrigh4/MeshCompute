@@ -41,12 +41,16 @@ def source_check():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["check", "build"])
+    parser.add_argument("action", choices=["check", "build", "run", "limits"])
     parser.add_argument("--engine", choices=["podman", "docker"], default="podman")
     parser.add_argument("--name", choices=NAMES, help="build one example instead of all")
     args = parser.parse_args()
     if args.action == "check":
         source_check()
+        return
+    if args.action in ("run", "limits"):
+        from devtools.container_checks import main_check
+        main_check(args.action, args.engine)
         return
     if not shutil.which(args.engine):
         raise SystemExit(f"PENDING: {args.engine} is not installed; OCI builds were not performed")

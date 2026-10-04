@@ -27,6 +27,7 @@ from controller.services.worker_health import worker_status
 
 STATE_DIR = Path(__file__).resolve().parents[1] / ".meshcompute-lab"
 STATE_FILE = STATE_DIR / "workers.json"
+REAL_STATE_FILE = STATE_DIR / "real-worker.json"
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -35,7 +36,8 @@ class LabError(RuntimeError):
 
 
 class Lab:
-    def __init__(self):
+    def __init__(self, state_file=STATE_FILE):
+        self.state_file = state_file
         self.engine = get_engine()
         self.url = os.environ.get("MESHCOMPUTE_LAB_URL", "http://127.0.0.1:8000").rstrip("/")
         parsed = urlsplit(self.url)
@@ -60,19 +62,19 @@ class Lab:
         return response
 
     def credentials(self):
-        if STATE_DIR.is_symlink() or STATE_FILE.is_symlink():
+        if STATE_DIR.is_symlink() or self.state_file.is_symlink():
             raise LabError("Refusing symlinked credential storage")
-        if not STATE_FILE.exists():
+        if not self.state_file.exists():
             return {}
-        if STATE_FILE.stat().st_mode & 0o077:
+        if self.state_file.stat().st_mode & 0o077:
             raise LabError("Credential file permissions must be 0600")
-        saved = json.loads(STATE_FILE.read_text())
+        saved = json.loads(self.state_file.read_text())
         if saved["controller_url"] != self.url:
             raise LabError("Saved credentials belong to another controller; use the matching URL or reset the lab")
         return saved["workers"]
 
     def save(self, workers):
-        if STATE_DIR.is_symlink() or STATE_FILE.is_symlink():
+        if STATE_DIR.is_symlink() or self.state_file.is_symlink():
             raise LabError("Refusing symlinked credential storage")
         STATE_DIR.mkdir(mode=0o700, exist_ok=True)
         STATE_DIR.chmod(0o700)
@@ -81,7 +83,7 @@ class Lab:
         try:
             with os.fdopen(fd, "w") as output:
                 json.dump({"controller_url": self.url, "workers": workers}, output)
-            os.replace(temporary, STATE_FILE)
+            os.replace(temporary, self.state_file)
         finally:
             Path(temporary).unlink(missing_ok=True)
 
@@ -176,6 +178,7 @@ class Lab:
             # No CASCADE: unexpected tables/FKs should block, not be silently deleted.
             connection.execute(text("TRUNCATE worker_allocations, job_attempts, jobs, workers"))
         STATE_FILE.unlink(missing_ok=True)
+        REAL_STATE_FILE.unlink(missing_ok=True)
         print("Local lab state reset (schema and migration history preserved).")
 
 

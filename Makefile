@@ -61,3 +61,16 @@ examples-build-podman:
 
 examples-build-docker:
 	$(PYTHON) -m devtools.examples build --engine docker
+
+.PHONY: examples-run-podman check-container-limits dev-real-worker test-real-worker
+examples-run-podman:
+	$(PYTHON) -m devtools.examples run --engine podman
+
+check-container-limits:
+	$(PYTHON) -m devtools.examples limits --engine podman
+
+dev-real-worker:
+	$(PYTHON) -m devtools.real_worker start
+
+test-real-worker:
+	$(PYTHON) -m devtools.real_worker test

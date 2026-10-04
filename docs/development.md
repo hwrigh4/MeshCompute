@@ -287,3 +287,140 @@ on each Linux device using its own registration/environment and a secured
 controller URL, then validate actual engine probes on those hosts. Devices still
 use outbound heartbeats/claims. Keep local simulated fixtures and credentials
 separate; do not run destructive lab helpers against that environment.
+
+## Repeatable real-environment validation
+
+These checks extend Phase 4.5 only. Use the local PostgreSQL/controller and a
+working Podman installation with the six local example images. Run sequentially
+on small development machines; the defaults suit a 4-CPU Chromebook with limited
+available RAM and no swap. No helper installs software or changes engine/system
+configuration. Existing loopback-only controller/database guards still apply.
+
+Recommended order (preserve existing `.env` and database settings):
+
+```bash
+# Terminal 1: leave the controller running
+make dev-controller              # or make dev-up to also start Compose PostgreSQL
+
+# Terminal 2: inspect before changing anything
+make dev-status
+make dev-state
+make check-engines
+make examples-build-podman       # only if the local images need building
+make examples-run-podman
+make check-container-limits
+make dev-real-worker             # foreground actual agent; leave running
+
+# Terminal 3: after its first heartbeat (normally within 5 seconds)
+make dev-state
+make test-real-worker
+make dev-state                   # results remain persisted
+```
+
+For Podman, enable its rootless API socket explicitly as described above if it
+is inactive. Both the CLI and API should work: API probe success alone does not
+establish that CLI image/container commands work from the current environment.
+
+On one Debian 13 Crostini Chromebook, Compose failed with a Netavark nftables
+error and succeeded with this **optional, per-command workaround**:
+
+```bash
+NETAVARK_FW=iptables make dev-db-up COMPOSE=podman-compose
+```
+
+This is an observation, not a universal fix or a global default. The helpers do
+not set it, install firewall tools, or alter system configuration. Diagnose other
+networking failures separately.
+
+### Sequential OCI image and kernel-limit checks
+
+`examples-run-podman` runs existing `localhost/meshcompute-<example>:dev` images
+one at a time, with no pulls. Missing images fail with the build command. All runs
+use `--network=none --cpus=1 --memory=128m --pids-limit=64 --read-only
+--cap-drop=ALL --security-opt=no-new-privileges`. The helper uses local Podman
+(`--remote=false`), without host mounts or privileged mode.
+
+Expect six PASS lines and `6/6 checks passed; 0 failed`. The failure example must
+exit **7** and print its intentional-failure marker; all others must exit **0**.
+Container state inspection separates startup/engine/OOM errors from the expected
+workload failure. The helper bounds each attached run to 30 seconds and engine
+operations to 15 seconds. It removes only its own randomly named container after
+each check, including failures, Ctrl-C and SIGTERM. A cleanup failure is nonzero
+and names the container for manual inspection; remaining checks stop to avoid
+overlapping workloads. No pruning or unrelated removal occurs. Abrupt
+SIGKILL/host shutdown cannot guarantee cleanup.
+
+`check-container-limits` uses the success image to read `cpu.max`, `memory.max`,
+and `pids.max` from `/sys/fs/cgroup` inside a container with the same restrictions.
+Expect a CPU quota/period ratio of **1**, memory **134217728**, and PID limit **64**.
+The CPU period need not be 100000. Missing cgroup v2 files, unlimited values,
+invalid output, mismatches, and unsupported environments fail nonzero. This
+validates **configured kernel limits**, not a stress test or comprehensive
+isolation audit. The helper applies the same timeouts and cleanup policy.
+
+These manual-engine runs are separate from MeshCompute execution. No worker
+launches a container, pulls an image, or reports completion.
+
+### Real heartbeat agent and one explicit assignment
+
+`dev-real-worker` registers/reuses `lab-real-local`, stored separately from
+simulated aliases in `.meshcompute-lab/real-worker.json`. It reuses the lab's
+atomic credential writes (directory 0700, file 0600, gitignored). Credentials go
+only into the production worker's environment, never its arguments or output.
+A Linux advisory lock, retained by the actual agent, prevents duplicate
+helper-managed agents for this identity in the same checkout. Do not copy this
+credential file to another checkout or start a second agent manually with it.
+Lock files remain on disk; the kernel releases locks when their processes exit.
+
+The helper defaults to **1 CPU / 256 MiB**, and requires the actual Podman API
+probe to pass before registration. It then runs the unchanged production
+heartbeat implementation, including real host detection, contribution clamping,
+engine probes, the 5-second heartbeat cadence, and signal handling. Override
+contributions explicitly when needed:
+
+```bash
+MESHCOMPUTE_WORKER_CPU_LIMIT=2 MESHCOMPUTE_WORKER_MEMORY_LIMIT_MB=512 make dev-real-worker
+```
+
+Existing worker socket environment settings apply. An explicit
+`MESHCOMPUTE_WORKER_CONTAINER_ENGINE=docker` or `auto` uses production detection
+semantics, but `test-real-worker` deliberately requires advertised Podman
+capability. The contribution is **scheduler configuration**, not OS enforcement;
+manual Podman checks above validate actual container kernel limits.
+
+`test-real-worker` requires the helper-managed agent to be running, freshly
+HEALTHY, container/Podman-capable, and contributing at least 0.5 CPU / 128 MiB.
+It checks that the saved identity matches the configured database. Stale
+credentials fail with guidance instead of silently registering replacements.
+Keep other job submitters and claimers stopped during this check. Preflight
+refuses any queued/running jobs, attempts, or allocations anywhere in the lab;
+it does not erase or modify existing work. Concurrent copies of this check in
+one checkout are also refused.
+
+It submits one success-image job (0.5 CPU / 128 MiB), rechecks for competing work,
+makes exactly one explicit authenticated claim through the production worker's
+`claim_once` implementation, and verifies the returned
+assignment plus the database's RUNNING job, LEASED attempt number 1, and matching
+allocation. Expected final message:
+
+```text
+Assignment validated; container execution remains Phase 5.
+```
+
+Submission/claim failures are never automatically retried. An ambiguous claim
+triggers persisted-state inspection; if inspection is unavailable, run
+`make dev-state` before deciding what to do next. Interruptions may also leave a
+queued or assigned job. This is diagnostics, not reconciliation.
+
+Results remain for inspection. A second test run intentionally refuses the dirty
+lab: Phase 4 allocations never expire or complete. **Stopping the real worker
+does not release reservations.** To repeat, first inspect results, stop the worker
+with Ctrl-C in Terminal 2, then explicitly run `make dev-reset` only if all local
+work can be deleted. Reset removes simulated and real credential files. Restart
+`make dev-real-worker` (new identity) and repeat the test. For a database reset
+performed outside the helper, stop the agent and remove only the stale
+`.meshcompute-lab/real-worker.json` after confirming the reset and DB/URL pairing.
+Never reset automatically to resolve a configuration mismatch.
+
+For shutdown, Ctrl-C the worker and controller in their respective terminals;
+`make dev-down` optionally stops Compose PostgreSQL while retaining its volume.
