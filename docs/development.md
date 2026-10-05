@@ -1,4 +1,4 @@
-# Local functional lab (Phases 4.5–6)
+# Local functional lab (Phases 4.5–7)
 
 This Linux development lab uses real APIs, authentication, PostgreSQL transactions,
 and the allocation ledger. Phase 4.5 scheduler fixtures simulate worker hardware;
@@ -419,14 +419,18 @@ credential file to another checkout or start a second agent manually with it.
 Lock files remain on disk; the kernel releases locks when their processes exit.
 
 The helper defaults to **1 CPU / 256 MiB**, and requires the actual Podman API
-probe to pass before registration. It then runs the unchanged production
+probe to pass before registration. It then runs the production
 heartbeat implementation, including real host detection, contribution clamping,
 engine probes, the 5-second heartbeat cadence, and signal handling. Override
-contributions explicitly when needed:
+initial contributions explicitly for a new identity:
 
 ```bash
 MESHCOMPUTE_WORKER_CPU_LIMIT=2 MESHCOMPUTE_WORKER_MEMORY_LIMIT_MB=512 make dev-real-worker
 ```
+
+After provider state exists, use `mesh-worker resources` with the matching worker
+ID and lab state directory to change contribution; environment limits no longer
+overwrite persisted settings. See the Phase 7 workflow below.
 
 Existing worker socket environment settings apply. An explicit
 `MESHCOMPUTE_WORKER_CONTAINER_ENGINE=docker` or `auto` uses production detection
@@ -661,9 +665,9 @@ guidance rather than assuming the workload is gone.
 Ctrl-C/SIGTERM during execution cleans up the current container and attempts a
 FAILED/WORKER_INTERRUPTED result while ownership remains valid. Phase 6 now
 recovers expired reservations after SIGKILL, host loss, or unresolved controller
-communication. Only LOST attempts are retryable; ordinary Phase 5 failures remain
+communication. Only LOST and PREEMPTED attempts are retryable; ordinary Phase 5 failures remain
 terminal even with `max_attempts=3`. Lease loss cleans up without reporting
-WORKER_INTERRUPTED. No provider preemption or reconciliation is implemented.
+WORKER_INTERRUPTED. Phase 7 adds explicit provider preemption; reconciliation remains deferred.
 For shutdown, stop the worker and controller with Ctrl-C, then optionally
 `make dev-down COMPOSE=podman-compose`; the database volume remains.
 
@@ -707,7 +711,7 @@ ownership state is required. Shutdown cancels and awaits the task and its bounde
 DB scan. Restart immediately scans persisted deadlines without waiting for a
 worker, claim, or manual recovery request.
 
-Only LOST attempts consume the retry policy: if the highest attempt number is
+LOST recovery (and Phase 7 PREEMPTED reporting) uses the retry policy: if the highest attempt number is
 below `max_attempts`, the job becomes QUEUED with a null completion time. The
 next normal claim creates the next attempt; claim also defensively enforces the
 limit. At exhaustion the job becomes FAILED. Job `started_at` retains its first
@@ -726,8 +730,8 @@ the allocation. Claim requests themselves are still never blindly retried.
 Hard death can leave a provider-side orphan running after controller recovery:
 the controller cannot reach into an unavailable provider engine. The orphan may
 exit naturally or stop with its engine/host. Retries can overlap it: execution is
-**at least once**, not exactly once. Worker reconciliation belongs to Phase 8;
-provider preemption belongs to Phase 7. Neither is implemented here.
+**at least once**, not exactly once. Worker reconciliation remains deferred to Phase 8. Phase 7 provider preemption
+controls only live tracked execution sessions; it does not discover orphans.
 
 ### Recovery validation
 
@@ -787,3 +791,135 @@ confirmed disposable lab. No deadlines are invented for ambiguous old ownership.
 Existing terminal history and saved identities remain compatible. Downgrade
 refuses active leases or LOST history; test upgrade/check/downgrade 0004/upgrade/
 check only on a separate empty disposable database, using the commands above.
+
+
+## Phase 7 local provider controls
+
+Use the same Linux account, worker ID, and state directory as the running worker.
+The commands below need **no bearer token**. Execution and heartbeat agents still
+receive credentials only through their environment.
+
+```bash
+export MESHCOMPUTE_WORKER_ID=<your-worker-UUID>
+mesh-worker status
+mesh-worker pause
+mesh-worker resume
+mesh-worker drain
+mesh-worker resources --cpu 1 --memory 256   # logical CPUs and MiB, zero allowed
+mesh-worker stop-all
+```
+
+With the local lab helpers, also set:
+
+```bash
+export MESHCOMPUTE_WORKER_STATE_DIR="$PWD/.meshcompute-lab/provider-state"
+# Set MESHCOMPUTE_WORKER_CONTROLLER_URL too if your controller is not localhost:8000.
+```
+
+`status` prints provider intent, configured contributions/engine, controller
+reachability, and the current live execution session (including whether local
+cleanup is confirmed). It does not enumerate engine containers. A missing live
+session is not evidence that no orphan exists. The health probe is bounded and
+unauthenticated; status does not need controller availability.
+
+Provider settings live at `$XDG_STATE_HOME/meshcompute/<worker-id>/provider.json`
+(default `~/.local/state/meshcompute/...`), or under `MESHCOMPUTE_WORKER_STATE_DIR`.
+Directories are 0700; files/locks are 0600, owner checked, symlinks rejected.
+Writes use a locked atomic replacement with fsync. The file contains only
+participation, CPU/MiB contribution, revision, and stop-request sequence—no token.
+On first use it is initialized from worker environment limits (default zero).
+Thereafter stored limits take precedence; use `resources` to change them. Physical
+capacity still caps advertised contribution. Settings survive process restart.
+Lab helpers isolate these files under the gitignored `.meshcompute-lab/`; reset
+invalidates identities but does not erase provider intent for old worker IDs.
+
+Pause and drain both prevent new **local claims** immediately and advertise
+PAUSED/DRAINING on the next heartbeat update. Existing execution and renewal
+continue. DRAINING remains set after completion until resume. Resume requests
+HEALTHY participation; actual engine health and stale/OFFLINE policy still apply
+through `effective_worker_state()`. Live heartbeats notice setting changes on a
+short local poll rather than requiring an agent restart. A controller outage
+can delay advertisement, but cannot undo local intent.
+
+Resource reductions update heartbeat contribution without killing existing work.
+The allocation ledger remains authoritative and allocatable capacity floors at
+zero until reservations fit. **This intentionally differs from PROJECT.md's
+future dynamic-capacity preemption rule:** the explicit Phase 7 scope requires
+preserving existing allocations on reduction. Reclaim immediately with stop-all.
+No automatic resource-pressure preemption was added.
+
+`stop-all` persists PAUSED and a new stop-request sequence, then requests a local
+cleanup acknowledgement from the live execution session. A same-user Linux
+Unix socket exposes only session status/cleanup acknowledgement; it is not a
+remote control API. The execution coordinator notices the persisted request,
+cancels execution (including image/start preparation), and runs the existing
+attempt-label-verified stop/kill/cleanup path. It does not scan or adopt other
+containers. The monotonic stop sequence also covers a claim already in flight.
+Normal SIGINT/SIGTERM remains WORKER_INTERRUPTED; lease loss remains distinct.
+Stop-all leaves participation PAUSED until explicitly resumed.
+
+Local cleanup does not await HTTP reporting. The command waits for local cleanup
+confirmation with a bounded timeout and reports failure if it cannot confirm;
+unavailable/unresponsive engines cannot be promised to reclaim resources.
+With a valid lease, the worker then reports PREEMPTED/PROVIDER_PREEMPTED through
+the existing authenticated result endpoint. This is valid from LEASED or RUNNING;
+only the assigned worker may do so. Identical reports are idempotent, conflicting
+reports fail, and expired ownership cannot overwrite LOST or a later attempt.
+
+The result, allocation deletion, and retry decision commit together under the
+existing worker → job → attempt locks. If attempts remain, job state becomes
+QUEUED with no completion timestamp; otherwise FAILED. First job start time is
+preserved. Normal claim creates the next numbered attempt, never exceeding
+`max_attempts`. LOST and PREEMPTED share the retry decision; normal FAILED and
+TIMED_OUT outcomes remain terminal.
+
+If the controller is unavailable, stop-all still removes the local container.
+The worker may make bounded idempotent PREEMPTED report retries while its lease
+remains valid; it never claims server-side release without confirmation. If
+reporting stays unavailable, renewal stops when work-once exits, and persisted
+lease expiry/recovery later records LOST and retries/fails normally. No durable
+result outbox, orphan discovery, or restart reconciliation is implemented.
+After hard worker death, stop-all cannot discover its former containers; inspect
+those separately until Phase 8. At-least-once overlap remains possible.
+
+No migration 0007 is needed: attempt states are stored as VARCHAR(16), with no
+state-enumeration database constraint, and existing result fields/indexes suffice.
+`alembic check` should remain clean at 0006. Do not run older code against new
+PREEMPTED history; downgrade validation belongs only in an empty disposable DB.
+
+### Provider-control validation
+
+Stop other controllers and agents for this lab, keep PostgreSQL running, and
+build the existing success/sleep images explicitly if missing:
+
+```bash
+make dev-db-up COMPOSE=podman-compose
+make dev-migrate
+make dev-state
+make test-provider
+make dev-state
+```
+
+The suite reuses the recovery harness's owned controller lifecycle so it can
+stop/restart only its own controller for the offline check. It refuses an occupied
+controller port or active lab jobs/reservations, never resets data, and retains
+results. Select an engine with `python -m local_test.provider --engine podman`
+(or `docker`); auto prefers Podman. Provider test identities use the existing
+protected credential conventions in `.meshcompute-lab/provider-workers.json`.
+
+Tests include a post-claim/pre-launch stop/resume fixture using the real worker
+execution path, plus real heartbeats/CLI/engine execution for pause/resume and restart
+persistence, drain, reduced capacity, online stop-all and second-worker retry,
+repeated PREEMPTED exhaustion, and offline immediate cleanup followed by LOST
+recovery. CPU/MiB requests stay small (0.5 CPU/128 MiB). The ownership assertion
+briefly runs a separate restricted 0.1 CPU/64 MiB sleep fixture alongside the
+workload; only the harness removes it after checking its separate fixture label.
+Offline lease backdating is explicitly a test-only SQL fixture; result reporting
+is never fabricated. Existing test-scheduler (explicit reset), test-execution,
+and test-recovery remain separate, with their original semantics/checks.
+
+Afterward, `make dev-up COMPOSE=podman-compose` returns to the ordinary lab.
+Ctrl-C stops owned test children. Inspect retained state after failures; reset
+only explicitly confirmed disposable data. The optional Crostini
+`NETAVARK_FW=iptables` workaround remains per-command, not a global default.
+All lab controller/database restrictions remain localhost-only.

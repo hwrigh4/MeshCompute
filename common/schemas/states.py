@@ -25,3 +25,4 @@ class AttemptState(StrEnum):
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
     LOST = "LOST"
+    PREEMPTED = "PREEMPTED"

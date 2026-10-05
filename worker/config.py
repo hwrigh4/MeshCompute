@@ -1,3 +1,4 @@
+from pathlib import Path
 from uuid import UUID
 import os
 from typing import Literal
@@ -17,6 +18,7 @@ class WorkerSettings(BaseSettings):
     token: SecretStr
     cpu_limit: float = Field(default=0, ge=0, allow_inf_nan=False)
     memory_limit_mb: int = Field(default=0, ge=0)
+    state_dir: Path = Field(default_factory=lambda: Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'meshcompute')
     docker_socket: str = "/var/run/docker.sock"
     container_engine: Literal["auto", "podman", "docker"] = "auto"
     podman_socket: str = Field(default_factory=lambda: (

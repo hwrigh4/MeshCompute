@@ -1,4 +1,4 @@
-# Local functional tests (Phases 4.5–6)
+# Local functional tests (Phases 4.5–7)
 
 This repo-root Python package holds MeshCompute's local functional testing tools.
 It keeps these kinds of validation distinct:
@@ -118,7 +118,7 @@ state before rerunning. Old unleased reservations require inspection before migr
 `make dev-work-once` executes one manually submitted job using the protected real
 identity. Production `mesh-worker work-once` takes credentials only through the
 environment, sends heartbeats, claims once, executes, reports, and exits. No
-separate heartbeat process is required. Only LOST attempts retry up to `max_attempts`;
+separate heartbeat process is required. Only LOST/PREEMPTED attempts retry up to `max_attempts`;
 ordinary execution failures remain terminal.
 Inspect the printed attempt through `GET /v1/attempts/{id}` or `make dev-state`.
 See the [execution workflow and limits](../docs/development.md#phase-5-container-execution)
@@ -167,9 +167,32 @@ fixtures are labeled separately from real-engine behavior. Results stay in the
 DB; protected recovery identities stay in `.meshcompute-lab/recovery-workers.json`.
 
 Heartbeats do not renew leases. Leases last 30 seconds, renew every 10, and are
-recovered by the controller about every 5. Only LOST attempts requeue while
+recovered by the controller about every 5. Only LOST/PREEMPTED attempts requeue while
 attempts remain. Stale workers cannot mutate expired assignments. Hard death can
 leave an orphan provider container and overlapping retry execution: this is
 at-least-once behavior. The harness cleans only its labeled orphan fixtures;
-production reconciliation and provider preemption remain deferred. See
+production reconciliation remains deferred; Phase 7 controls live sessions. See
 [recovery details](../docs/development.md#phase-6-leases-and-failure-recovery).
+
+
+## Phase 7 provider controls
+
+`make test-provider` reuses the owned-controller recovery harness. Stop normal
+controllers/agents first, start PostgreSQL, migrate, and build success/sleep images
+explicitly if missing. The suite refuses active work and never resets data.
+
+It validates real pause/resume, settings across restart, draining, capacity
+reduction without killing work, online/offline stop-all, PREEMPTED retries and
+exhaustion, and preservation of an unrelated restricted container. Only the
+ownership check briefly overlaps two small workloads. Test fixtures and retained
+results follow the existing local lab conventions. Use `--engine podman` or
+`--engine docker` through `python -m local_test.provider` for diagnosis.
+
+For manual controls use `mesh-worker status|pause|resume|drain|stop-all` and
+`mesh-worker resources --cpu 1 --memory 256`. Set the worker ID and the same
+state directory as the agent. Lab helpers use `.meshcompute-lab/provider-state`;
+production defaults to `~/.local/state/meshcompute`. Controls need no token.
+Stop-all leaves participation PAUSED and acknowledges local cleanup independently
+of controller reporting. It never discovers orphan containers after restart.
+See [provider controls](../docs/development.md#phase-7-local-provider-controls)
+for complete configuration, security, offline semantics, and shutdown details.

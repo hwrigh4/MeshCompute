@@ -10,7 +10,7 @@ from common.schemas.states import AttemptState
 LOG_LIMIT = 64 * 1024
 Engine = Literal['podman', 'docker']
 FailureReason = Literal[
-    'ENGINE_UNAVAILABLE', 'IMAGE_PULL_FAILED', 'CONTAINER_CREATE_FAILED',
+    'PROVIDER_PREEMPTED', 'ENGINE_UNAVAILABLE', 'IMAGE_PULL_FAILED', 'CONTAINER_CREATE_FAILED',
     'CONTAINER_START_FAILED', 'NONZERO_EXIT', 'TIMEOUT', 'RESULT_CAPTURE_FAILED',
     'SECURITY_POLICY_UNSUPPORTED', 'CONTAINER_CLEANUP_FAILED', 'WORKER_INTERRUPTED',
 ]
@@ -23,7 +23,7 @@ class AttemptStart(BaseModel):
 
 class AttemptResult(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    state: Literal[AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT]
+    state: Literal[AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT, AttemptState.PREEMPTED]
     container_engine: Engine | None = None
     exit_code: int | None = Field(default=None, ge=-2147483648, le=2147483647)
     failure_reason: FailureReason | None = None
@@ -41,6 +41,8 @@ class AttemptResult(BaseModel):
 
     @model_validator(mode='after')
     def outcome(self):
+        if (self.state == AttemptState.PREEMPTED) != (self.failure_reason == 'PROVIDER_PREEMPTED'):
+            raise ValueError('PREEMPTED requires PROVIDER_PREEMPTED exclusively')
         if self.state == AttemptState.SUCCEEDED:
             if self.exit_code != 0 or self.failure_reason is not None or self.container_engine is None:
                 raise ValueError('Success requires engine, exit 0, and no failure reason')

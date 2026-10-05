@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from common.schemas.attempts import AttemptView
 from controller.models.job_attempt import JobAttempt
 from local_test.execution_fixtures import FAILURE_REASONS, SCENARIOS as FIXTURE_SCENARIOS, run_assigned
-from local_test.lab import Lab, LabError, REAL_STATE_FILE
+from local_test.lab import Lab, LabError, REAL_STATE_FILE, STATE_DIR
 from local_test.real_worker import acquire, identity, lock_file
 from worker.config import WorkerSettings
 from worker.executors.container import ContainerExecutor
@@ -105,6 +105,7 @@ def run_scenarios(lab, selected, engine):
                     raise LabError(f'Missing {name} image; run make examples-build-{actual_engine}. No test job submitted.')
             w = identity(lab, register=True)
             env = os.environ.copy()
+            env.setdefault("MESHCOMPUTE_WORKER_STATE_DIR", str(STATE_DIR / "provider-state"))
             env.update(MESHCOMPUTE_WORKER_CONTROLLER_URL=lab.url, MESHCOMPUTE_WORKER_ID=w['id'],
                        MESHCOMPUTE_WORKER_TOKEN=w['token'], MESHCOMPUTE_WORKER_CPU_LIMIT='1',
                        MESHCOMPUTE_WORKER_MEMORY_LIMIT_MB='256', MESHCOMPUTE_WORKER_CONTAINER_ENGINE=engine)
@@ -204,7 +205,7 @@ def run_scenarios(lab, selected, engine):
                     assert inspected, 'No running-container inspection obtained'
                 reason = f", reason={result['failure_reason']}" if scenario in FAILURE_REASONS else ''
                 print(f'PASS {scenario}: {state}{reason}, engine={actual_engine}, attempt={attempt_id}; allocation/container removed', flush=True)
-    print('Execution validated; results retained. Normal execution failures remain terminal; only LOST attempts are retryable.')
+    print('Execution validated; results retained. Normal execution failures remain terminal; only LOST/PREEMPTED attempts are retryable.')
 
 
 def main():

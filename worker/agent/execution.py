@@ -13,6 +13,7 @@ from worker.agent.claim import claim_once
 from worker.agent.leases import LeaseKeeper, LeaseLost
 from worker.agent.loop import run_agent
 from worker.executors.compatible import ExecutionError
+from worker.preemption.control import ControlStore, LiveAttempt
 
 logger = logging.getLogger(__name__)
 
@@ -54,19 +55,32 @@ async def report(settings, assignment, action, payload, lease=None):
 
 
 async def execute_assignment(settings, executor, assignment):
+    store = ControlStore(settings)
+    async with LiveAttempt(settings, assignment) as live:
+        return await execute_leased(settings, executor, assignment, store, live)
+
+
+async def execute_leased(settings, executor, assignment, store, live):
     lease = LeaseKeeper(settings, assignment)
     keeper = asyncio.create_task(lease.run())
 
     async def execute():
         await lease.ready.wait()
         lease.check()
-        return await _execute_assignment(settings, executor, assignment, lease)
+        return await _execute_assignment(settings, executor, assignment, lease, live)
 
     work = asyncio.create_task(execute())
+    preemption = asyncio.create_task(live.watch(store))
     try:
-        done, _ = await asyncio.wait((work, keeper), return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait((work, keeper, preemption), return_when=asyncio.FIRST_COMPLETED)
         if work in done:
             return await work
+        if preemption in done:
+            work.cancel()
+            try:
+                return await work
+            finally:
+                await preemption  # Surface invalid local state only after cleanup.
         lease.lose()
         work.cancel()
         with suppress(asyncio.CancelledError, LeaseLost):
@@ -78,12 +92,12 @@ async def execute_assignment(settings, executor, assignment):
             await asyncio.shield(work)
         raise
     finally:
+        preemption.cancel()
         keeper.cancel()
-        with suppress(asyncio.CancelledError):
-            await keeper
+        await asyncio.gather(preemption, keeper, return_exceptions=True)
 
 
-async def _execute_assignment(settings, executor, assignment, lease):
+async def _execute_assignment(settings, executor, assignment, lease, live):
     backend = None
     output = None
     result = AttemptResult(state=AttemptState.FAILED, failure_reason='ENGINE_UNAVAILABLE')
@@ -91,6 +105,7 @@ async def _execute_assignment(settings, executor, assignment, lease):
     try:
         backend = await executor.select()
         result.container_engine = backend.engine
+        live.engine = backend.engine
         image = await backend.ensure_image(assignment.image)
         # Create (without launching) allows policy validation before start reporting.
         await backend.create(assignment, image)
@@ -110,7 +125,7 @@ async def _execute_assignment(settings, executor, assignment, lease):
             result.failure_reason = 'TIMEOUT'
         await output.finish()
     except asyncio.CancelledError:
-        interrupted = not lease.lost
+        interrupted = not lease.lost and not live.preempted
         result.state, result.failure_reason = AttemptState.FAILED, 'WORKER_INTERRUPTED'
     except ExecutionError as exc:
         result.state, result.failure_reason = AttemptState.FAILED, exc.reason
@@ -126,11 +141,15 @@ async def _execute_assignment(settings, executor, assignment, lease):
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
                     # Lease loss during cleanup must not interrupt container removal.
-                    interrupted = not lease.lost
+                    interrupted = not lease.lost and not live.preempted
                     await asyncio.shield(cleanup)
             except (ExecutionError, httpx.HTTPError, OSError, TimeoutError):
                 raise ReportingFailed(f'Cleanup unresolved for attempt {assignment.attempt_id}; inspect its labeled container and controller reservation') from None
+        live.cleaned = True
+        live.cleanup_done.set()
     lease.check()  # Never turn lease-loss cleanup into a stale terminal report.
+    if live.preempted:
+        result.state, result.failure_reason = AttemptState.PREEMPTED, 'PROVIDER_PREEMPTED'
     if output:
         result.stdout_tail = output.stdout.text()
         result.stderr_tail = output.stderr.text()
@@ -161,7 +180,7 @@ async def work_once(settings, executor):
                 raise ReportingFailed('No confirmed heartbeat within 30 seconds; no claim made') from None
             assignment = await claim_once(settings)
             if assignment is None:
-                logger.info('No work (204)')
+                logger.info('No work (local controls or controller 204)')
                 return None
             logger.info('Claimed job %s / attempt %s', assignment.job_id, assignment.attempt_id)
             return await execute_assignment(settings, executor, assignment)

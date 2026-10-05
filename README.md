@@ -7,7 +7,9 @@ Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeat
 Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
 assignment with resource reservations. Phase 5 adds restricted container execution,
 bounded results, and atomic reservation release through `mesh-worker work-once`.
-Phase 6 adds persisted ownership leases, renewal, and LOST-only retry/recovery.
+Phase 6 adds persisted ownership leases, renewal, and LOST retry/recovery.
+Phase 7 adds persistent local provider controls and PREEMPTED retries;
+`mesh-worker stop-all` reclaims live workloads without controller connectivity.
 Use `make test-recovery` for its focused functional checks; see the lab instructions.
 
 The Phase 4.5 [local functional lab](docs/development.md) adds Make commands,
@@ -104,18 +106,22 @@ Configuration comes from environment variables, with prefix `MESHCOMPUTE_WORKER_
 | --- | --- | --- |
 | `CONTROLLER_URL` | `http://127.0.0.1:8000` | Controller HTTP(S) base URL |
 | `ID` | required | Registered worker UUID |
-| `TOKEN` | required | Registration bearer token, held only in memory |
-| `CPU_LIMIT` | `0` | Contributed logical CPUs; fractional values allowed |
-| `MEMORY_LIMIT_MB` | `0` | Contributed memory in MiB (1,048,576 bytes) |
+| `TOKEN` | required for agents/claim | Registration bearer token, held only in memory; local controls need none |
+| `CPU_LIMIT` | `0` | Initial contributed logical CPUs; fractional values allowed |
+| `MEMORY_LIMIT_MB` | `0` | Initial contributed memory in MiB (1,048,576 bytes) |
 | `DOCKER_SOCKET` | `/var/run/docker.sock` | Local Docker Engine Unix socket |
 | `PODMAN_SOCKET` | `$XDG_RUNTIME_DIR/podman/podman.sock` | Local Podman API socket; falls back to `/run/user/<uid>/podman/podman.sock` |
 | `CONTAINER_ENGINE` | `auto` | `auto`, `podman`, or `docker`; required engine readiness |
+| `STATE_DIR` | `$XDG_STATE_HOME/meshcompute` or `~/.local/state/meshcompute` | Secure per-worker provider settings; no credentials |
 
 For 4 CPUs and 8 GiB, set `CPU_LIMIT=4` and `MEMORY_LIMIT_MB=8192` using the full
 environment names above. Limits above detected host capacity are capped at that
 capacity; negative and nonfinite CPU limits are rejected. Zero contribution is
-valid and does not itself make a worker unhealthy. Restart the agent to change
-limits; local dynamic provider controls are a later phase.
+valid and does not itself make a worker unhealthy. Environment limits initialize
+the provider state on first use. Stored settings then take precedence; use
+`mesh-worker resources --cpu 4 --memory 8192` to change them without restarting.
+`pause`, `resume`, `drain`, `stop-all`, and `status` are also local controls. See
+the [provider workflow](docs/development.md#phase-7-local-provider-controls).
 
 The worker does not read `.env` or create a credential file. Keep the token out
 of command-line arguments and logs; unset `MESHCOMPUTE_WORKER_TOKEN` when done.
@@ -237,8 +243,8 @@ element. CPU must be positive and finite; fractional CPUs are accepted. Memory
 (MiB), timeout (seconds), and maximum attempts must be positive integers, at most
 2,147,483,647. Invalid requests return 422, including NaN/infinity. Resource
 requests are not compared with current worker capacity; a job can be queued even
-with no workers. `max_attempts` is stored for future recovery policy; Phase 4
-creates attempt 1 on assignment and has no retries.
+with no workers. `max_attempts` limits total attempts, including retries after
+LOST or PREEMPTED. Ordinary failures/timeouts remain terminal without retries.
 
 List, retrieve, and cancel jobs (replace the UUID with one returned by submission):
 
@@ -280,10 +286,12 @@ worker environment, explicitly ask for one assignment:
 mesh-worker claim
 ```
 
-This prints an assignment or `No work (204)` and exits. It performs one request
-and never executes the command. The normal heartbeat loop does not automatically
+This prints an assignment or `No work (local controls or controller 204)` and exits. Local PAUSED/DRAINING
+or zero contribution prevents a claim. Otherwise it performs one request and
+never executes the command. The normal heartbeat loop does not automatically
 claim work in this phase. A failed claim response may conceal a committed assignment;
-the command does not automatically retry. Recovery and reconciliation are later phases.
+the command does not automatically retry. Persisted leases now recover abandoned
+assignments; orphan reconciliation remains deferred.
 
 The equivalent authenticated API request is:
 

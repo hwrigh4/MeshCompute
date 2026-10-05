@@ -12,6 +12,7 @@ from worker.agent.claim import ClaimFailed, claim_once
 from worker.agent.leases import LeaseLost
 from worker.agent.execution import ReportingFailed, work_once
 from worker.config import WorkerSettings
+from worker.preemption.control import ControlError, command
 from worker.executors.container import ContainerExecutor
 
 
@@ -30,27 +31,41 @@ async def serve(settings: WorkerSettings, execute: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MeshCompute worker: heartbeat, diagnostic claim, or one restricted execution")
-    parser.add_argument("action", nargs="?", choices=["claim", "work-once"], help="claim prints an assignment; work-once executes one job with heartbeats")
+    parser = argparse.ArgumentParser(description="MeshCompute worker: heartbeat, execution, and local provider controls")
+    parser.add_argument("action", nargs="?", choices=["claim", "work-once", "status", "pause", "resume", "drain", "resources", "stop-all"], help="default: heartbeat; work-once: one execution; controls operate locally without a token")
+    parser.add_argument('--cpu', type=float, help='contributed logical CPUs (resources only)')
+    parser.add_argument('--memory', type=int, help='contributed MiB (resources only)')
     args = parser.parse_args()
+    if args.action == 'resources' and (args.cpu is None or args.memory is None):
+        parser.error('resources requires --cpu and --memory')
+    if args.action != 'resources' and (args.cpu is not None or args.memory is not None):
+        parser.error('--cpu/--memory require resources')
+    local = args.action in ('status', 'pause', 'resume', 'drain', 'resources', 'stop-all')
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if sys.platform != "linux":
         raise SystemExit("The MeshCompute worker currently requires Linux")
     try:
-        settings = WorkerSettings()
+        settings = WorkerSettings(token='local-control-no-credential') if local else WorkerSettings()
     except ValidationError:
         # Never print configuration values, even in validation errors.
         raise SystemExit("Invalid worker configuration; check MESHCOMPUTE_WORKER_* settings") from None
     logging.info("Starting worker %s", settings.id)
     try:
-        if args.action == "claim":
+        if local:
+            asyncio.run(command(settings, args.action, args.cpu, args.memory))
+        elif args.action == "claim":
             assignment = asyncio.run(claim_once(settings))
-            print(assignment.model_dump_json(indent=2) if assignment else "No work (204)")
+            print(assignment.model_dump_json(indent=2) if assignment else "No work (local controls or controller 204)")
         else:
             asyncio.run(serve(settings, execute=args.action == "work-once"))
-    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost) as exc:
+    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost, ControlError) as exc:
         raise SystemExit(str(exc)) from None
+    except (OSError, TimeoutError, ValueError):
+        message = 'Worker/control failed; inspect provider settings, permissions, and live agent.'
+        if args.action == 'stop-all':
+            message += ' Local cleanup is not confirmed.'
+        raise SystemExit(message) from None
     logging.info("Worker stopped")
 
 

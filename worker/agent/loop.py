@@ -11,6 +11,7 @@ from common.schemas.workers import WorkerHeartbeat
 from worker.config import WorkerSettings
 from worker.executors.base import Executor
 from worker.resources.detection import detect_resources
+from worker.preemption.control import ControlStore
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL = 5
@@ -21,6 +22,7 @@ class HeartbeatRejected(RuntimeError):
 
 
 async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio.Event | None = None) -> None:
+    store = ControlStore(settings)
     psutil.cpu_percent(interval=None)  # Prime the utilization sample.
     agent_version = version("meshcompute")
     async with httpx.AsyncClient(
@@ -30,12 +32,14 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
     ) as client:
         while True:
             started = asyncio.get_running_loop().time()
+            revision = store.read().revision
             try:
                 capabilities = await executor.capabilities()
-                resources, telemetry = detect_resources(settings.cpu_limit, settings.memory_limit_mb)
+                state = store.read()
+                resources, telemetry = detect_resources(state.cpu, state.memory_mb)
                 payload = WorkerHeartbeat(
                     agent_version=agent_version,
-                    state=WorkerState.HEALTHY if capabilities.healthy else WorkerState.DEGRADED,
+                    state=state.participation if state.participation != 'HEALTHY' else (WorkerState.HEALTHY if capabilities.healthy else WorkerState.DEGRADED),
                     cpu_architecture=platform.machine(),
                     resources=resources, telemetry=telemetry, executors=capabilities.executors,
                     container_engines=capabilities.container_engines,
@@ -60,4 +64,6 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
                 logger.warning("Resource or runtime detection failed; retrying heartbeat")
             # Keep the normal cadence without overlapping requests or retry storms.
             elapsed = asyncio.get_running_loop().time() - started
-            await asyncio.sleep(max(1, HEARTBEAT_INTERVAL - elapsed))
+            end = asyncio.get_running_loop().time() + max(1, HEARTBEAT_INTERVAL - elapsed)
+            while asyncio.get_running_loop().time() < end and store.read().revision == revision:
+                await asyncio.sleep(.1)

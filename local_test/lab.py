@@ -181,6 +181,7 @@ class Lab:
         STATE_FILE.unlink(missing_ok=True)
         REAL_STATE_FILE.unlink(missing_ok=True)
         (STATE_DIR / "recovery-workers.json").unlink(missing_ok=True)
+        (STATE_DIR / "provider-workers.json").unlink(missing_ok=True)
         print("Local lab state reset (schema and migration history preserved).")
 
 

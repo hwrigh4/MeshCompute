@@ -1,9 +1,11 @@
 import asyncio
+import logging
 
 import httpx
 
 from common.schemas.assignments import WorkAssignment
 from worker.config import WorkerSettings
+from worker.preemption.control import ControlStore
 
 
 class ClaimFailed(RuntimeError):
@@ -12,6 +14,10 @@ class ClaimFailed(RuntimeError):
 
 async def claim_once(settings: WorkerSettings) -> WorkAssignment | None:
     """Make one explicit claim; this function never launches or retries an assignment."""
+    state = ControlStore(settings).read()
+    if state.participation != 'HEALTHY' or state.cpu == 0 or state.memory_mb == 0:
+        logging.getLogger(__name__).info('Local participation/contribution blocks claim; no controller request sent')
+        return None
     try:
         async with httpx.AsyncClient(
             base_url=str(settings.controller_url).rstrip("/") + "/",
@@ -24,6 +30,7 @@ async def claim_once(settings: WorkerSettings) -> WorkAssignment | None:
             if response.status_code == 204:
                 return None
             assignment = WorkAssignment.model_validate(response.json())
+            assignment._provider_stop_sequence = state.stop_sequence
             assignment._lease_deadline = sent + assignment.lease_duration_seconds
             return assignment
     except httpx.HTTPStatusError as exc:

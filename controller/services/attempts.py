@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from common.schemas.leases import LeaseRenewal
 from controller.services.lease_policy import ACTIVE_ATTEMPTS, controller_now, deadline, timing
+from controller.services.retry import retry_or_fail
 from common.schemas.attempts import AttemptResult, AttemptStart
 from common.schemas.states import AttemptState, JobState
 from controller.models.job import Job
@@ -13,7 +14,7 @@ from controller.models.job_attempt import JobAttempt
 from controller.models.worker import Worker
 from controller.models.worker_allocation import WorkerAllocation
 
-TERMINAL = {AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT, AttemptState.LOST}
+TERMINAL = {AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT, AttemptState.LOST, AttemptState.PREEMPTED}
 
 
 def locked(session: Session, worker_id: UUID, attempt_id: UUID):
@@ -57,7 +58,7 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
     now = require_live_lease(session, attempt)
     if (job.state != JobState.RUNNING
             or attempt.state not in {AttemptState.LEASED, AttemptState.RUNNING}
-            or (attempt.state == AttemptState.LEASED and payload.state != AttemptState.FAILED)
+            or (attempt.state == AttemptState.LEASED and payload.state not in {AttemptState.FAILED, AttemptState.PREEMPTED})
             or (attempt.container_engine is not None and attempt.container_engine != payload.container_engine)):
         raise HTTPException(409, 'Result incompatible with attempt state or engine')
     allocation = session.get(WorkerAllocation, attempt.id)
@@ -66,8 +67,11 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
     for key, value in values.items():
         setattr(attempt, key, value)
     attempt.completed_at = now
-    job.state = JobState.SUCCEEDED if payload.state == AttemptState.SUCCEEDED else JobState.FAILED
-    job.completed_at = now
+    if payload.state == AttemptState.PREEMPTED:
+        retry_or_fail(session, job, now)
+    else:
+        job.state = JobState.SUCCEEDED if payload.state == AttemptState.SUCCEEDED else JobState.FAILED
+        job.completed_at = now
     session.delete(allocation)
     session.commit()  # Result, job, and accounting are one transaction.
     session.refresh(attempt)

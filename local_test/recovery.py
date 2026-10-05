@@ -117,6 +117,7 @@ class RecoveryLab:
 
     def spawn(self, w, execute=False):
         env = os.environ.copy()
+        env.setdefault("MESHCOMPUTE_WORKER_STATE_DIR", str(STATE_DIR / "provider-state"))
         env.update(MESHCOMPUTE_WORKER_CONTROLLER_URL=self.lab.url, MESHCOMPUTE_WORKER_ID=w['id'],
                    MESHCOMPUTE_WORKER_TOKEN=w['token'], MESHCOMPUTE_WORKER_CPU_LIMIT='1',
                    MESHCOMPUTE_WORKER_MEMORY_LIMIT_MB='256', MESHCOMPUTE_WORKER_CONTAINER_ENGINE=self.engine_name)
@@ -377,7 +378,7 @@ def run(h):
     h.orphans.remove(first['id'])
     print('PASS explicit renewal rejection stops real workload without stale result', flush=True)
     clean(lab)
-    print('Recovery validated; results retained. No provider preemption or orphan reconciliation implemented.')
+    print('Recovery validated; results retained. Provider controls have a separate suite; orphan reconciliation remains deferred.')
 
 
 def main():

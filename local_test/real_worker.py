@@ -71,6 +71,7 @@ def start(lab, work_once=False):
             raise LabError("A helper-managed real worker is already running in this checkout; stop it first")
         # Validate settings and the actual production API probe before registration.
         env = os.environ.copy()
+        env.setdefault("MESHCOMPUTE_WORKER_STATE_DIR", str(STATE_DIR / "provider-state"))
         env.update(MESHCOMPUTE_WORKER_CONTROLLER_URL=lab.url,
                    MESHCOMPUTE_WORKER_ID="00000000-0000-0000-0000-000000000000",
                    MESHCOMPUTE_WORKER_TOKEN="configuration-check")
@@ -126,7 +127,8 @@ def verify(lab):
         if (any(j["id"] != job["id"] and j["state"] in ("QUEUED", "RUNNING") for j in pending["jobs"])
                 or pending["attempts"] or pending["allocations"]):
             raise LabError("Lab changed during submission; no claim made. Results preserved; inspect make dev-state")
-        settings = WorkerSettings(controller_url=lab.url, id=w["id"], token=w["token"])
+        settings = WorkerSettings(controller_url=lab.url, id=w["id"], token=w["token"],
+                                  state_dir=os.environ.get("MESHCOMPUTE_WORKER_STATE_DIR", str(STATE_DIR / "provider-state")))
         try:
             result = asyncio.run(claim_once(settings))
             assignment = result.model_dump(mode="json") if result else None

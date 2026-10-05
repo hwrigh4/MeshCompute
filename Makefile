@@ -106,3 +106,8 @@ test-execution:
 .PHONY: test-recovery
 test-recovery:
 	$(PYTHON) -m local_test.recovery
+
+# Owns a temporary controller to prove offline reclaim; PostgreSQL must run.
+.PHONY: test-provider
+test-provider:
+	$(PYTHON) -m local_test.provider

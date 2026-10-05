@@ -15,6 +15,7 @@ from controller.models.job_attempt import JobAttempt
 from controller.models.worker_allocation import WorkerAllocation
 from controller.services.attempts import locked
 from controller.services.lease_policy import ACTIVE_ATTEMPTS, RECOVERY_BATCH_SIZE, RECOVERY_INTERVAL_SECONDS, controller_now
+from controller.services.retry import retry_or_fail
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,7 @@ def recover_one(engine, worker_id, attempt_id):
         if allocation is not None:
             session.delete(allocation)
         if job.state == JobState.RUNNING:
-            used = session.scalar(select(func.max(JobAttempt.attempt_number)).where(JobAttempt.job_id == job.id))
-            if used < job.max_attempts:
-                job.state, job.completed_at = JobState.QUEUED, None
-            else:
-                job.state, job.completed_at = JobState.FAILED, now
+            retry_or_fail(session, job, now)
         session.commit()  # LOST, job retry decision, and ledger release are atomic.
         return True
 

@@ -12,6 +12,7 @@ class ClaimRequest(BaseModel):
 
 class WorkAssignment(LeaseTiming):
     # Local-only conservative clock; never serialized into the wire protocol.
+    _provider_stop_sequence: int | None = PrivateAttr(default=None)
     _lease_deadline: float | None = PrivateAttr(default=None)
     attempt_id: UUID
     job_id: UUID
