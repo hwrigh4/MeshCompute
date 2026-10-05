@@ -667,7 +667,7 @@ FAILED/WORKER_INTERRUPTED result while ownership remains valid. Phase 6 now
 recovers expired reservations after SIGKILL, host loss, or unresolved controller
 communication. Only LOST and PREEMPTED attempts are retryable; ordinary Phase 5 failures remain
 terminal even with `max_attempts=3`. Lease loss cleans up without reporting
-WORKER_INTERRUPTED. Phase 7 adds explicit provider preemption; reconciliation remains deferred.
+WORKER_INTERRUPTED. Phase 7 adds explicit provider preemption; Phase 8 adds startup/reconnect reconciliation.
 For shutdown, stop the worker and controller with Ctrl-C, then optionally
 `make dev-down COMPOSE=podman-compose`; the database volume remains.
 
@@ -730,8 +730,8 @@ the allocation. Claim requests themselves are still never blindly retried.
 Hard death can leave a provider-side orphan running after controller recovery:
 the controller cannot reach into an unavailable provider engine. The orphan may
 exit naturally or stop with its engine/host. Retries can overlap it: execution is
-**at least once**, not exactly once. Worker reconciliation remains deferred to Phase 8. Phase 7 provider preemption
-controls only live tracked execution sessions; it does not discover orphans.
+**at least once**, not exactly once. Phase 8 worker reconciliation cleans stale owned containers on startup/reconnect;
+the controller itself still cannot reach an unavailable provider engine.
 
 ### Recovery validation
 
@@ -853,8 +853,8 @@ cleanup acknowledgement from the live execution session. A same-user Linux
 Unix socket exposes only session status/cleanup acknowledgement; it is not a
 remote control API. The execution coordinator notices the persisted request,
 cancels execution (including image/start preparation), and runs the existing
-attempt-label-verified stop/kill/cleanup path. It does not scan or adopt other
-containers. The monotonic stop sequence also covers a claim already in flight.
+attempt-label-verified stop/kill/cleanup path. Phase 8 additionally scans explicitly worker-labeled containers for local reclaim;
+it never adopts execution or touches unrelated containers. The monotonic stop sequence also covers a claim already in flight.
 Normal SIGINT/SIGTERM remains WORKER_INTERRUPTED; lease loss remains distinct.
 Stop-all leaves participation PAUSED until explicitly resumed.
 
@@ -877,10 +877,8 @@ If the controller is unavailable, stop-all still removes the local container.
 The worker may make bounded idempotent PREEMPTED report retries while its lease
 remains valid; it never claims server-side release without confirmation. If
 reporting stays unavailable, renewal stops when work-once exits, and persisted
-lease expiry/recovery later records LOST and retries/fails normally. No durable
-result outbox, orphan discovery, or restart reconciliation is implemented.
-After hard worker death, stop-all cannot discover its former containers; inspect
-those separately until Phase 8. At-least-once overlap remains possible.
+lease expiry/recovery later records LOST and retries/fails normally. No durable result outbox is implemented. Phase 8 adds orphan cleanup and
+startup/reconnect reconciliation; at-least-once overlap remains possible.
 
 No migration 0007 is needed: attempt states are stored as VARCHAR(16), with no
 state-enumeration database constraint, and existing result fields/indexes suffice.
@@ -923,3 +921,95 @@ Ctrl-C stops owned test children. Inspect retained state after failures; reset
 only explicitly confirmed disposable data. The optional Crostini
 `NETAVARK_FW=iptables` workaround remains per-command, not a global default.
 All lab controller/database restrictions remain localhost-only.
+
+## Phase 8 reconciliation
+
+Workers compare a bounded local engine inventory with an authenticated
+`POST /v1/workers/{worker_id}/reconcile` snapshot before the first heartbeat,
+before diagnostic/execution claims, every 30 seconds, and after heartbeat
+connectivity failures. Scans run separately from heartbeats and lease renewal.
+`mesh-worker reconcile` runs one explicit comparison using the normal worker
+configuration and credentials. No claim is retried automatically.
+
+New containers carry attempt, job **and worker** UUID labels. Discovery filters
+by the attempt label, validates UUIDs, and inspects immutable engine IDs. Cleanup
+rechecks all ownership labels; names alone never authorize deletion. Discovered
+containers are removed without deleting attached engine volumes, whose ownership
+cannot be established by discovery. Container tmpfs disappears with the container. Containers
+labeled for another worker, unrelated containers, and malformed/unattributable
+legacy containers are not deleted. Legacy attempt/job-only containers are cleaned
+only when this worker's authenticated controller snapshot confirms ownership;
+unknown legacy containers block new claims and require manual ownership inspection.
+Auto mode scans both usable engines; explicit engine mode scans only that engine.
+Keep the original engine socket configuration when recovering a worker. An
+unavailable engine never proves that its workloads are missing.
+
+A matching active container is left alone; discovery does not adopt execution,
+renew its lease, or replay a result. Its outstanding reservation blocks new
+local claims. The original live executor may finish it, or lease recovery later
+makes it eligible for cleanup. Terminal/unknown/expired local work is removed
+without rewriting controller history. Active live execution owns its own cleanup;
+its lease keeper stops stale work without racing attached output capture.
+
+For RUNNING work absent from a successfully inspected engine, the worker sends
+`POST /v1/workers/{worker_id}/attempts/{attempt_id}/missing` with the observed job,
+engine and lease deadline. The controller authenticates assignment ownership and
+rechecks RUNNING, allocation, live lease and unchanged deadline under the existing
+worker → job → attempt locks. Concurrent renewal/start/completion causes conflict
+instead of trusting a stale absence report. LOST/WORKLOAD_MISSING, allocation
+release, and retry/exhaustion commit atomically. LEASED image preparation and live
+cleanup/result reporting are not inferred missing. If the live executor itself
+observes an engine 404 after launch, it uses this same missing-workload transition
+and stops renewal rather than submitting a generic failure. Unconfirmed reports
+fall back to lease recovery, never assumed release.
+
+Heartbeats carry at most 128 cached, ownership-verified active attempt IDs. These
+are observational, not persisted authority or a substitute for a complete engine
+scan. Discovery has count/response-size/time bounds; failed or oversized scans
+block claims. No new database fields or migration are needed; head remains 0006.
+Requester attempt reads remain local-MVP APIs, unsuitable for public exposure
+without requester authentication.
+
+PAUSED/DRAINING intent is unchanged. `stop-all` still cancels live execution before
+controller reporting, and additionally cleans this worker's explicitly labeled
+local containers without controller access. It does not adopt orphan results or
+claim a reservation was released: an orphan with no live executor is resolved
+server-side by lease recovery. Unavailable engines cannot guarantee local reclaim.
+Legacy containers without a worker label still require ownership verification.
+Hard-death/partition overlap remains possible until cleanup: execution is at least
+once. There is no exactly-once guarantee, result outbox, or Phase 9 instrumentation.
+
+### Reconciliation validation
+
+Stop normal controller/worker processes yourself, keep PostgreSQL running, and
+use an idle local lab (no queued jobs or allocations):
+
+```bash
+make dev-db-up COMPOSE=podman-compose
+make dev-migrate
+make examples-build-podman   # explicit, only if images are missing
+make test-reconciliation
+```
+
+The suite owns/restarts its controller and refuses occupied ports or active work;
+it never resets data, installs dependencies, or builds/pulls images. Use
+`python -m local_test.reconciliation --engine podman` (or `docker`) for explicit
+engine selection. The optional Crostini `NETAVARK_FW=iptables` workaround remains
+host-specific, not a global default. Localhost-only controller/DB guards remain.
+
+Checks cover real worker SIGKILL/startup orphan cleanup and retry, valid matching
+containers, external removal/missing workloads, terminal and unknown leftovers,
+wrong-worker/missing-token/stale-snapshot rejection, idempotency, reconnect cleanup,
+and preservation of an unrelated restricted container. Direct engine/API fixtures
+are identified in output; they are not described as executed requester results.
+Workloads run sequentially apart from the tiny ownership fixture. Fixture cleanup
+uses its own explicit label; production cleanup assertions happen first.
+
+Results and `.meshcompute-lab/reconciliation-workers.json` credentials are retained
+with the existing 0700/0600 protections. Inspect `make dev-state`; rerun only when
+idle. Any reset remains explicit (`make dev-reset YES=1`) after inspecting what it
+will remove. The suite stops only its own child processes and test containers.
+For manual shutdown use Ctrl-C, then optionally `make dev-down COMPOSE=podman-compose`;
+stopping services does not erase their volumes. Run `make test-scheduler YES=1`
+only in an explicitly disposable lab, and run `make test-execution`,
+`make test-recovery`, and `make test-provider` separately with their existing setup.

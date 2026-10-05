@@ -171,7 +171,7 @@ recovered by the controller about every 5. Only LOST/PREEMPTED attempts requeue 
 attempts remain. Stale workers cannot mutate expired assignments. Hard death can
 leave an orphan provider container and overlapping retry execution: this is
 at-least-once behavior. The harness cleans only its labeled orphan fixtures;
-production reconciliation remains deferred; Phase 7 controls live sessions. See
+Phase 8 production reconciliation cleans stale owned containers after restart/reconnect. See
 [recovery details](../docs/development.md#phase-6-leases-and-failure-recovery).
 
 
@@ -193,6 +193,33 @@ For manual controls use `mesh-worker status|pause|resume|drain|stop-all` and
 state directory as the agent. Lab helpers use `.meshcompute-lab/provider-state`;
 production defaults to `~/.local/state/meshcompute`. Controls need no token.
 Stop-all leaves participation PAUSED and acknowledges local cleanup independently
-of controller reporting. It never discovers orphan containers after restart.
+of controller reporting. Phase 8 also reclaims containers explicitly labeled for this worker after restart.
 See [provider controls](../docs/development.md#phase-7-local-provider-controls)
 for complete configuration, security, offline semantics, and shutdown details.
+
+## Phase 8 reconciliation
+
+`make test-reconciliation` reuses the owned-controller recovery lab: stop normal
+controllers/workers first, keep local PostgreSQL running, run `make dev-migrate`,
+and explicitly build success/sleep images if absent. It refuses active work and
+occupied ports, never resets data, and preserves results for `make dev-state`.
+Select an engine with `python -m local_test.reconciliation --engine podman|docker`.
+
+Real-engine checks cover hard worker death/restart cleanup and retry, valid active
+work left untouched, missing workload LOST/release/retry or exhaustion, terminal
+and unknown leftovers, reconnect cleanup, ownership safety, and idempotency.
+API/engine fixtures are identified separately. Only the tiny unrelated ownership
+fixture overlaps workloads. Credentials use the existing protected gitignored
+`.meshcompute-lab/reconciliation-workers.json`; only owned children/fixtures are
+cleaned up. Explicit reset and shutdown instructions remain unchanged.
+
+Production workers reconcile before claims, at startup, after reconnect, and every
+30 seconds without engine scans in the heartbeat path. `mesh-worker reconcile`
+provides a one-pass diagnostic. Worker/attempt/job labels and immutable engine IDs
+protect cleanup. Valid discovered work is never adopted or renewed; it blocks new
+claims until completion/expiry. Unknown legacy containers without worker labels
+need manual ownership inspection. Missing RUNNING work becomes LOST only after an
+authenticated, current lease/context check; LEASED preparation is not missing work.
+PAUSED/DRAINING and local offline stop-all retain priority. See
+[Phase 8 details](../docs/development.md#phase-8-reconciliation) for protocol,
+limits, legacy handling, at-least-once implications, and test setup.

@@ -92,9 +92,12 @@ class CompatibleExecutor:
         )
         self.container_id = None
         self.attempt_id = None
+        self.job_id = None
+        self.worker_id = None
         self.name = None
         self.create_attempted = False
         self.output = None
+        self.started = False
 
     async def request(self, method, path, reason, **kwargs):
         try:
@@ -139,6 +142,7 @@ class CompatibleExecutor:
         if not assignment.command or not assignment.command[0]:
             raise ExecutionError('CONTAINER_CREATE_FAILED')
         self.attempt_id = str(assignment.attempt_id)
+        self.job_id = str(assignment.job_id)
         self.name = 'meshcompute-' + self.attempt_id
         existing = await self.client.get(f'/containers/{self.name}/json')
         if existing.status_code != 404:
@@ -165,6 +169,8 @@ class CompatibleExecutor:
                 'LogConfig': {'Type': 'none'},
             },
         }
+        if self.worker_id is not None:
+            config['Labels']['io.meshcompute.worker'] = str(self.worker_id)
         self.create_attempted = True
         response = await self.request('POST', '/containers/create', 'CONTAINER_CREATE_FAILED', params={'name': self.name}, json=config)
         try:
@@ -173,10 +179,20 @@ class CompatibleExecutor:
         except (KeyError, ValueError, TypeError):
             raise ExecutionError('SECURITY_POLICY_UNSUPPORTED') from None
 
+    def owned(self, info):
+        labels = info.get('Config', {}).get('Labels') or {}
+        return (labels.get('io.meshcompute.attempt') == self.attempt_id
+                and (self.job_id is None or labels.get('io.meshcompute.job') == self.job_id)
+                and (self.worker_id is None or labels.get('io.meshcompute.worker') == str(self.worker_id)))
+
     async def inspect(self):
-        response = await self.request('GET', f'/containers/{self.container_id}/json', 'CONTAINER_START_FAILED')
+        response = await self.client.get(f'/containers/{self.container_id}/json')
+        if response.status_code == 404 and self.started:
+            raise ExecutionError('WORKLOAD_MISSING')
+        if response.status_code != 200:
+            raise ExecutionError('CONTAINER_START_FAILED')
         info = response.json()
-        if info.get('Config', {}).get('Labels', {}).get('io.meshcompute.attempt') != self.attempt_id:
+        if not self.owned(info):
             raise ExecutionError('CONTAINER_CLEANUP_FAILED')
         return info
 
@@ -233,6 +249,7 @@ class CompatibleExecutor:
     async def start(self):
         await self.inspect()
         await self.request('POST', f'/containers/{self.container_id}/start', 'CONTAINER_START_FAILED')
+        self.started = True
 
     async def wait(self):
         # Polling avoids unbounded /wait HTTP timeouts and allows local deadlines.
@@ -261,7 +278,7 @@ class CompatibleExecutor:
         async with asyncio.timeout(5):
             await self.wait()
 
-    async def cleanup(self):
+    async def cleanup(self, *, remove_volumes=True):
         try:
             if self.create_attempted:
                 # Also handles a create committed with its response lost. The UUID
@@ -270,7 +287,7 @@ class CompatibleExecutor:
                 if response.status_code != 404:
                     response.raise_for_status()
                     info = response.json()
-                    if info.get('Config', {}).get('Labels', {}).get('io.meshcompute.attempt') != self.attempt_id:
+                    if not self.owned(info):
                         raise ExecutionError('CONTAINER_CLEANUP_FAILED')
                     self.container_id = info['Id']
                     if info['State']['Running']:
@@ -282,7 +299,7 @@ class CompatibleExecutor:
                     if self.output:
                         with suppress(ExecutionError):
                             await self.output.finish()
-                    await self.request('DELETE', f'/containers/{self.container_id}', 'CONTAINER_CLEANUP_FAILED', params={'force': 'true', 'v': 'true'})
+                    await self.request('DELETE', f'/containers/{self.container_id}', 'CONTAINER_CLEANUP_FAILED', params={'force': 'true', 'v': str(remove_volumes).lower()})
         except (httpx.HTTPError, OSError, ValueError, KeyError):
             raise ExecutionError('CONTAINER_CLEANUP_FAILED') from None
         finally:

@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from common.schemas.states import WorkerState
+from common.schemas.reconciliation import MAX_ATTEMPTS
 
 
 class WorkerRegistration(BaseModel):
@@ -96,6 +97,7 @@ class WorkerHeartbeat(BaseModel):
     resources: ResourceSnapshot
     telemetry: Telemetry
     executors: ExecutorCapabilities
+    active_attempt_ids: list[UUID] = Field(default_factory=list, max_length=MAX_ATTEMPTS)
     container_engines: ContainerEngines | None = None
 
     @model_validator(mode="after")

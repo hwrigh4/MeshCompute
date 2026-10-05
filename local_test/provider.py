@@ -229,7 +229,7 @@ def run(h):
     assert h.post(a, first, 'result', {'state': 'PREEMPTED', 'container_engine': h.actual, 'failure_reason': 'PROVIDER_PREEMPTED'}).status_code == 409
     assert h.attempt(job) == lost
     print('PASS offline stop-all reclaims locally before reporting; reservation remains until LOST recovery', flush=True)
-    print('Provider controls validated; results retained. No orphan discovery/reconciliation.')
+    print('Provider controls validated; results retained. Reconciliation has a separate suite.')
 
 
 def main():

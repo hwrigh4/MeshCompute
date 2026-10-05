@@ -126,8 +126,10 @@ class RecoveryLab:
         return p
 
     def heartbeat(self, w):
+        previous = next((x['last_heartbeat'] for x in self.lab.snapshot()['workers'] if x['id'] == w['id']), None)
         p = self.spawn(w)
-        until(lambda: any(x['id'] == w['id'] and x['state'] == 'HEALTHY' for x in self.lab.snapshot()['workers']), 'Real heartbeat not healthy')
+        until(lambda: any(x['id'] == w['id'] and x['state'] == 'HEALTHY'
+                          and x['last_heartbeat'] != previous for x in self.lab.snapshot()['workers']), 'Real heartbeat not freshly healthy')
         return p
 
     def submit(self, name, seconds=None, maximum=2):
@@ -378,7 +380,7 @@ def run(h):
     h.orphans.remove(first['id'])
     print('PASS explicit renewal rejection stops real workload without stale result', flush=True)
     clean(lab)
-    print('Recovery validated; results retained. Provider controls have a separate suite; orphan reconciliation remains deferred.')
+    print('Recovery validated; results retained. Provider controls have a separate suite; orphan reconciliation has a separate suite.')
 
 
 def main():

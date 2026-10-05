@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from worker.agent.loop import HeartbeatRejected, run_agent
 from worker.agent.claim import ClaimFailed, claim_once
 from worker.agent.leases import LeaseLost
+from worker.agent.reconciliation import reconcile, ReconciliationFailed
 from worker.agent.execution import ReportingFailed, work_once
 from worker.config import WorkerSettings
 from worker.preemption.control import ControlError, command
@@ -32,7 +33,7 @@ async def serve(settings: WorkerSettings, execute: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MeshCompute worker: heartbeat, execution, and local provider controls")
-    parser.add_argument("action", nargs="?", choices=["claim", "work-once", "status", "pause", "resume", "drain", "resources", "stop-all"], help="default: heartbeat; work-once: one execution; controls operate locally without a token")
+    parser.add_argument("action", nargs="?", choices=["reconcile", "claim", "work-once", "status", "pause", "resume", "drain", "resources", "stop-all"], help="default: heartbeat; work-once: one execution; controls operate locally without a token")
     parser.add_argument('--cpu', type=float, help='contributed logical CPUs (resources only)')
     parser.add_argument('--memory', type=int, help='contributed MiB (resources only)')
     args = parser.parse_args()
@@ -54,12 +55,15 @@ def main() -> None:
     try:
         if local:
             asyncio.run(command(settings, args.action, args.cpu, args.memory))
+        elif args.action == "reconcile":
+            clear = asyncio.run(reconcile(settings))
+            print("Reconciled; " + ("no active reservation" if clear else "active work remains; claims blocked"))
         elif args.action == "claim":
             assignment = asyncio.run(claim_once(settings))
             print(assignment.model_dump_json(indent=2) if assignment else "No work (local controls or controller 204)")
         else:
             asyncio.run(serve(settings, execute=args.action == "work-once"))
-    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost, ControlError) as exc:
+    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost, ControlError, ReconciliationFailed) as exc:
         raise SystemExit(str(exc)) from None
     except (OSError, TimeoutError, ValueError):
         message = 'Worker/control failed; inspect provider settings, permissions, and live agent.'

@@ -12,6 +12,7 @@ from worker.config import WorkerSettings
 from worker.executors.base import Executor
 from worker.resources.detection import detect_resources
 from worker.preemption.control import ControlStore
+from worker.agent.reconciliation import active_ids, reconcile, ReconciliationFailed, ReconciliationRejected, INTERVAL
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL = 5
@@ -22,6 +23,43 @@ class HeartbeatRejected(RuntimeError):
 
 
 async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio.Event | None = None) -> None:
+    # Scans are independent of heartbeats and lease renewal. The first complete
+    # comparison gates startup; later failures never turn absence into evidence.
+    initialized, reconnect = asyncio.Event(), asyncio.Event()
+
+    async def comparisons():
+        while True:
+            reconnect.clear()
+            try:
+                await reconcile(settings)
+                initialized.set()
+            except ReconciliationRejected:
+                raise
+            except ReconciliationFailed:
+                logger.warning('Reconciliation incomplete; claims require a successful fresh comparison')
+            try:
+                await asyncio.wait_for(reconnect.wait(), INTERVAL if initialized.is_set() else 5)
+            except TimeoutError:
+                pass
+
+    async def heartbeats():
+        await initialized.wait()
+        await _heartbeats(settings, executor, ready, reconnect)
+
+    comparisons_task = asyncio.create_task(comparisons())
+    heartbeat_task = asyncio.create_task(heartbeats())
+    try:
+        done, _ = await asyncio.wait((comparisons_task, heartbeat_task), return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            await task
+    finally:
+        comparisons_task.cancel()
+        heartbeat_task.cancel()
+        await asyncio.gather(comparisons_task, heartbeat_task, return_exceptions=True)
+
+
+async def _heartbeats(settings, executor, ready, reconnect):
+    disconnected = False
     store = ControlStore(settings)
     psutil.cpu_percent(interval=None)  # Prime the utilization sample.
     agent_version = version("meshcompute")
@@ -38,7 +76,7 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
                 state = store.read()
                 resources, telemetry = detect_resources(state.cpu, state.memory_mb)
                 payload = WorkerHeartbeat(
-                    agent_version=agent_version,
+                    agent_version=agent_version, active_attempt_ids=active_ids(settings),
                     state=state.participation if state.participation != 'HEALTHY' else (WorkerState.HEALTHY if capabilities.healthy else WorkerState.DEGRADED),
                     cpu_architecture=platform.machine(),
                     resources=resources, telemetry=telemetry, executors=capabilities.executors,
@@ -48,6 +86,9 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
                     f"v1/workers/{settings.id}/heartbeat", json=payload.model_dump(mode="json"),
                 )
                 response.raise_for_status()
+                if disconnected:
+                    reconnect.set()
+                    disconnected = False
                 if ready is not None:
                     ready.set()
             except httpx.HTTPStatusError as exc:
@@ -57,8 +98,12 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
                         f"Heartbeat rejected (HTTP {status}); check controller URL, "
                         "worker ID/token, and agent/controller protocol compatibility"
                     ) from None
+                disconnected = True
+                reconnect.set()
                 logger.warning("Heartbeat failed (HTTP %s); retrying", status)
             except httpx.RequestError:
+                disconnected = True
+                reconnect.set()
                 logger.warning("Controller unavailable; retrying heartbeat")
             except (OSError, RuntimeError, ValueError):
                 logger.warning("Resource or runtime detection failed; retrying heartbeat")

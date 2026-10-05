@@ -111,3 +111,8 @@ test-recovery:
 .PHONY: test-provider
 test-provider:
 	$(PYTHON) -m local_test.provider
+
+# Owns its controller; idle migrated local PostgreSQL and explicit images required.
+.PHONY: test-reconciliation
+test-reconciliation:
+	$(PYTHON) -m local_test.reconciliation

@@ -18,6 +18,17 @@ async def claim_once(settings: WorkerSettings) -> WorkAssignment | None:
     if state.participation != 'HEALTHY' or state.cpu == 0 or state.memory_mb == 0:
         logging.getLogger(__name__).info('Local participation/contribution blocks claim; no controller request sent')
         return None
+    from worker.agent.reconciliation import reconcile, ReconciliationFailed
+    try:
+        if not await reconcile(settings):
+            raise ClaimFailed('Existing execution/reservation unresolved; no new claim made')
+    except ReconciliationFailed as exc:
+        raise ClaimFailed(str(exc)) from None
+    # Reconciliation can wait on engine/controller I/O. Provider intent changed
+    # during that wait takes precedence over the earlier participation snapshot.
+    state = ControlStore(settings).read()
+    if state.participation != 'HEALTHY' or state.cpu == 0 or state.memory_mb == 0:
+        return None
     try:
         async with httpx.AsyncClient(
             base_url=str(settings.controller_url).rstrip("/") + "/",

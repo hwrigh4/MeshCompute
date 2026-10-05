@@ -11,7 +11,8 @@ from controller.api.jobs import JobRoute
 from controller.database import get_session
 from controller.models.job_attempt import JobAttempt
 from controller.models.worker import Worker
-from controller.services import attempts
+from common.schemas.reconciliation import MissingWorkload, ReconcileRequest, ReconcileView
+from controller.services import attempts, reconciliation
 
 router = APIRouter(tags=['attempts'], route_class=JobRoute)
 DatabaseSession = Annotated[Session, Depends(get_session)]
@@ -39,3 +40,13 @@ def finish_attempt(attempt_id: UUID, payload: AttemptResult, worker: AssignedWor
 @router.post('/v1/workers/{worker_id}/attempts/{attempt_id}/renew', response_model=LeaseRenewal)
 def renew_attempt(attempt_id: UUID, worker: AssignedWorker, session: DatabaseSession):
     return attempts.renew(session, worker.id, attempt_id)
+
+
+@router.post('/v1/workers/{worker_id}/reconcile', response_model=ReconcileView)
+def reconcile_worker(payload: ReconcileRequest, worker: AssignedWorker, session: DatabaseSession):
+    return reconciliation.snapshot(session, worker.id, payload.attempt_ids)
+
+
+@router.post('/v1/workers/{worker_id}/attempts/{attempt_id}/missing', response_model=AttemptView)
+def missing_workload(attempt_id: UUID, payload: MissingWorkload, worker: AssignedWorker, session: DatabaseSession):
+    return reconciliation.missing(session, worker.id, attempt_id, payload)

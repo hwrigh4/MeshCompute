@@ -11,6 +11,7 @@ from common.schemas.attempts import AttemptResult, AttemptStart, AttemptView
 from common.schemas.states import AttemptState
 from worker.agent.claim import claim_once
 from worker.agent.leases import LeaseKeeper, LeaseLost
+from worker.agent.reconciliation import observed, report_absence
 from worker.agent.loop import run_agent
 from worker.executors.compatible import ExecutionError
 from worker.preemption.control import ControlStore, LiveAttempt
@@ -102,8 +103,10 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
     output = None
     result = AttemptResult(state=AttemptState.FAILED, failure_reason='ENGINE_UNAVAILABLE')
     interrupted = False
+    missing = False
     try:
         backend = await executor.select()
+        backend.worker_id = settings.id
         result.container_engine = backend.engine
         live.engine = backend.engine
         image = await backend.ensure_image(assignment.image)
@@ -115,6 +118,7 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
         try:
             async with asyncio.timeout(assignment.timeout_seconds):
                 await backend.start()
+                observed(settings, assignment.attempt_id, True)
                 result.exit_code = await backend.wait()
             result.state = AttemptState.SUCCEEDED if result.exit_code == 0 else AttemptState.FAILED
             result.failure_reason = None if result.exit_code == 0 else 'NONZERO_EXIT'
@@ -128,7 +132,9 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
         interrupted = not lease.lost and not live.preempted
         result.state, result.failure_reason = AttemptState.FAILED, 'WORKER_INTERRUPTED'
     except ExecutionError as exc:
-        result.state, result.failure_reason = AttemptState.FAILED, exc.reason
+        missing = exc.reason == 'WORKLOAD_MISSING'
+        if not missing:
+            result.state, result.failure_reason = AttemptState.FAILED, exc.reason
     except (httpx.HTTPError, OSError, KeyError, ValueError, TypeError, TimeoutError):
         result.state, result.failure_reason = AttemptState.FAILED, 'CONTAINER_START_FAILED'
     finally:
@@ -145,8 +151,16 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
                     await asyncio.shield(cleanup)
             except (ExecutionError, httpx.HTTPError, OSError, TimeoutError):
                 raise ReportingFailed(f'Cleanup unresolved for attempt {assignment.attempt_id}; inspect its labeled container and controller reservation') from None
+        observed(settings, assignment.attempt_id, False)
         live.cleaned = True
         live.cleanup_done.set()
+    if missing and not lease.lost:
+        try:
+            await report_absence(settings, assignment)
+        except (httpx.HTTPError, ValueError):
+            logger.warning('Missing-workload report unresolved; lease recovery remains authoritative')
+        lease.reason = 'Local workload disappeared; controller reconciliation/recovery owns the outcome'
+        lease.lose()
     lease.check()  # Never turn lease-loss cleanup into a stale terminal report.
     if live.preempted:
         result.state, result.failure_reason = AttemptState.PREEMPTED, 'PROVIDER_PREEMPTED'

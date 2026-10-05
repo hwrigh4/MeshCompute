@@ -216,8 +216,10 @@ async def command(settings, action, cpu=None, memory=None):
             with suppress(OSError):
                 await connection[1].wait_closed()
     if action == 'stop-all':
+        from worker.agent.reconciliation import reclaim_local
+        await reclaim_local(settings)
         print('Participation PAUSED; live local attempt cleaned or no live execution session. '
-              'Controller release is separate; orphan discovery is not implemented.')
+              'Explicitly worker-labeled containers reclaimed; controller release is separate.')
     elif action == 'status':
         reachable = False
         try:
