@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 
 from common.schemas.assignments import WorkAssignment
@@ -16,11 +18,14 @@ async def claim_once(settings: WorkerSettings) -> WorkAssignment | None:
             headers={"Authorization": f"Bearer {settings.token.get_secret_value()}"},
             timeout=5, trust_env=False, follow_redirects=False,
         ) as client:
+            sent = asyncio.get_running_loop().time()
             response = await client.post(f"v1/workers/{settings.id}/claim")
             response.raise_for_status()
             if response.status_code == 204:
                 return None
-            return WorkAssignment.model_validate(response.json())
+            assignment = WorkAssignment.model_validate(response.json())
+            assignment._lease_deadline = sent + assignment.lease_duration_seconds
+            return assignment
     except httpx.HTTPStatusError as exc:
         raise ClaimFailed(f"Claim rejected (HTTP {exc.response.status_code}); check worker credentials and controller") from None
     except httpx.RequestError:

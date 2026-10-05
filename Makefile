@@ -101,3 +101,8 @@ dev-work-once:
 # Full Phase 5/5.1 suite; select individual scenarios through local_test.execution.
 test-execution:
 	$(PYTHON) -m local_test.execution
+
+# Owns a temporary controller to exercise restart; PostgreSQL must already run.
+.PHONY: test-recovery
+test-recovery:
+	$(PYTHON) -m local_test.recovery

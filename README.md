@@ -7,6 +7,8 @@ Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeat
 Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
 assignment with resource reservations. Phase 5 adds restricted container execution,
 bounded results, and atomic reservation release through `mesh-worker work-once`.
+Phase 6 adds persisted ownership leases, renewal, and LOST-only retry/recovery.
+Use `make test-recovery` for its focused functional checks; see the lab instructions.
 
 The Phase 4.5 [local functional lab](docs/development.md) adds Make commands,
 simulated logical workers, repeatable scheduler/concurrency scenarios, state
@@ -341,12 +343,14 @@ fractional CPU summation drift; memory is stored in integer MiB. Allocation and
 attempt worker indexes support worker lookups. The
 attempt-number unique index also covers lookups by job ID.
 
-In Phase 4, `RUNNING` means assigned and attempt `LEASED` means reserved. Job and
-attempt start timestamps, attempt completion, and lease expiration remain null.
-A diagnostic `claim` still launches no container. Phase 5 `work-once` adds
-execution and result-driven resource release. Neither path renews/expires leases,
-retries jobs, or recovers disappeared workers. Reservations persist across
-controller and agent restarts until a terminal result is recorded.
+Job `RUNNING` means assigned and attempt `LEASED` means reserved. A diagnostic
+`claim` launches no container and does not renew; its 30-second lease expires.
+`work-once` maintains heartbeats and attempt renewals throughout execution.
+Expired attempts become LOST, release their reservation, and requeue only while
+`max_attempts` permits. Ordinary failures/timeouts remain terminal. Lease expiry
+is authoritative even before the recovery scan; stale workers cannot report a
+result. Persisted deadlines survive controller restarts. Hard worker death can
+leave orphan containers and overlapping retry execution (at least once).
 Reducing contribution below existing reservations leaves zero allocatable capacity
 and blocks further claims; it does not preempt or release existing assignments.
 

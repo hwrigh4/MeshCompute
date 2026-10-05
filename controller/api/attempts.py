@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from common.schemas.leases import LeaseRenewal
 from common.schemas.attempts import AttemptResult, AttemptStart, AttemptView
 from controller.api.auth import authenticated_worker
 from controller.api.jobs import JobRoute
@@ -33,3 +34,8 @@ def start_attempt(attempt_id: UUID, payload: AttemptStart, worker: AssignedWorke
 @router.post('/v1/workers/{worker_id}/attempts/{attempt_id}/result', response_model=AttemptView)
 def finish_attempt(attempt_id: UUID, payload: AttemptResult, worker: AssignedWorker, session: DatabaseSession):
     return attempts.complete(session, worker.id, attempt_id, payload)
+
+
+@router.post('/v1/workers/{worker_id}/attempts/{attempt_id}/renew', response_model=LeaseRenewal)
+def renew_attempt(attempt_id: UUID, worker: AssignedWorker, session: DatabaseSession):
+    return attempts.renew(session, worker.id, attempt_id)

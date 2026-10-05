@@ -12,6 +12,7 @@ from controller.models.job import Job
 from controller.models.job_attempt import JobAttempt
 from controller.models.worker import Worker
 from controller.models.worker_allocation import WorkerAllocation
+from controller.services.lease_policy import controller_now, deadline, timing
 from controller.services.worker_health import effective_worker_state
 
 
@@ -58,9 +59,16 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
         select(func.coalesce(func.max(JobAttempt.attempt_number), 0))
         .where(JobAttempt.job_id == job.id)
     ) + 1
+    if attempt_number > job.max_attempts:
+        # Repair inconsistent queued state without creating excess attempts.
+        job.state = JobState.FAILED
+        job.completed_at = controller_now(session)
+        session.commit()
+        return None
+    expires_at = deadline(controller_now(session))
     attempt = JobAttempt(
         job_id=job.id, worker_id=worker.id, attempt_number=attempt_number,
-        state=AttemptState.LEASED,
+        state=AttemptState.LEASED, lease_expires_at=expires_at,
     )
     session.add(attempt)
     session.flush()
@@ -69,12 +77,12 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
         cpu_reserved=Decimal(str(job.cpu_requested)), memory_reserved_mb=job.memory_requested_mb,
     ))
     job.state = JobState.RUNNING
-    # RUNNING means assigned for now; execution/start and lease timestamps stay null.
+    # Job RUNNING means assigned; the attempt begins with a real ownership lease.
     assignment = WorkAssignment(
         attempt_id=attempt.id, job_id=job.id, runtime=job.runtime,
         image=job.image, command=job.command,
         resources=JobResources(cpu=job.cpu_requested, memory_mb=job.memory_requested_mb),
-        timeout_seconds=job.timeout_seconds,
+        timeout_seconds=job.timeout_seconds, **timing(expires_at),
     )
     session.commit()
     return assignment

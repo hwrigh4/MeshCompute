@@ -204,7 +204,7 @@ def run_scenarios(lab, selected, engine):
                     assert inspected, 'No running-container inspection obtained'
                 reason = f", reason={result['failure_reason']}" if scenario in FAILURE_REASONS else ''
                 print(f'PASS {scenario}: {state}{reason}, engine={actual_engine}, attempt={attempt_id}; allocation/container removed', flush=True)
-    print('Execution validated; results retained. No retry, lease expiry, or recovery implemented.')
+    print('Execution validated; results retained. Normal execution failures remain terminal; only LOST attempts are retryable.')
 
 
 def main():

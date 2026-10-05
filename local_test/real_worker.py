@@ -155,7 +155,7 @@ def verify(lab):
             raise LabError("Assignment validation failed; results preserved. Do not retry blindly; inspect make dev-state")
         print(f"PASS job {job['id']}: RUNNING; attempt {assignment['attempt_id']}: LEASED; reserved 0.5 CPU / 128 MiB")
         print("Assignment validated; this diagnostic does not execute containers. Use make test-execution for Phase 5.")
-        print("Results preserved. Stopping the agent does not release reservations; reruns require an explicit clean lab.")
+        print("Results preserved. This diagnostic claim does not renew: its lease expires and recovery releases the reservation. Inspect make dev-state; this diagnostic still requires empty attempt history for a rerun.")
 
 
 def inspect_failure(lab):

@@ -1,9 +1,25 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
+
 from fastapi import FastAPI
+from controller.services.recovery import recovery_loop
 
 from controller.api import attempts, health, jobs, workers
 from controller.api.body_limit import AttemptBodyLimit
 
-app = FastAPI(title="MeshCompute", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app):
+    task = asyncio.create_task(recovery_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="MeshCompute", version="0.1.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(workers.router)
 app.include_router(jobs.router)

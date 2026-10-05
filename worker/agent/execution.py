@@ -10,6 +10,7 @@ import httpx
 from common.schemas.attempts import AttemptResult, AttemptStart, AttemptView
 from common.schemas.states import AttemptState
 from worker.agent.claim import claim_once
+from worker.agent.leases import LeaseKeeper, LeaseLost
 from worker.agent.loop import run_agent
 from worker.executors.compatible import ExecutionError
 
@@ -20,7 +21,7 @@ class ReportingFailed(RuntimeError):
     pass
 
 
-async def report(settings, assignment, action, payload):
+async def report(settings, assignment, action, payload, lease=None):
     """Only idempotent mutations may retry; never claims or container starts."""
     async with httpx.AsyncClient(
         base_url=str(settings.controller_url).rstrip('/') + '/',
@@ -28,6 +29,8 @@ async def report(settings, assignment, action, payload):
         timeout=5, trust_env=False, follow_redirects=False,
     ) as client:
         for retry in range(3):
+            if lease is not None:
+                lease.check()
             try:
                 response = await client.post(
                     f'v1/workers/{settings.id}/attempts/{assignment.attempt_id}/{action}',
@@ -51,6 +54,36 @@ async def report(settings, assignment, action, payload):
 
 
 async def execute_assignment(settings, executor, assignment):
+    lease = LeaseKeeper(settings, assignment)
+    keeper = asyncio.create_task(lease.run())
+
+    async def execute():
+        await lease.ready.wait()
+        lease.check()
+        return await _execute_assignment(settings, executor, assignment, lease)
+
+    work = asyncio.create_task(execute())
+    try:
+        done, _ = await asyncio.wait((work, keeper), return_when=asyncio.FIRST_COMPLETED)
+        if work in done:
+            return await work
+        lease.lose()
+        work.cancel()
+        with suppress(asyncio.CancelledError, LeaseLost):
+            await work
+        raise LeaseLost(lease.reason)
+    except asyncio.CancelledError:
+        work.cancel()
+        with suppress(asyncio.CancelledError):
+            await asyncio.shield(work)
+        raise
+    finally:
+        keeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await keeper
+
+
+async def _execute_assignment(settings, executor, assignment, lease):
     backend = None
     output = None
     result = AttemptResult(state=AttemptState.FAILED, failure_reason='ENGINE_UNAVAILABLE')
@@ -62,7 +95,8 @@ async def execute_assignment(settings, executor, assignment):
         # Create (without launching) allows policy validation before start reporting.
         await backend.create(assignment, image)
         output = await backend.logs()
-        await report(settings, assignment, 'start', AttemptStart(container_engine=backend.engine))
+        await report(settings, assignment, 'start', AttemptStart(container_engine=backend.engine), lease)
+        lease.check()
         try:
             async with asyncio.timeout(assignment.timeout_seconds):
                 await backend.start()
@@ -76,7 +110,7 @@ async def execute_assignment(settings, executor, assignment):
             result.failure_reason = 'TIMEOUT'
         await output.finish()
     except asyncio.CancelledError:
-        interrupted = True
+        interrupted = not lease.lost
         result.state, result.failure_reason = AttemptState.FAILED, 'WORKER_INTERRUPTED'
     except ExecutionError as exc:
         result.state, result.failure_reason = AttemptState.FAILED, exc.reason
@@ -87,15 +121,22 @@ async def execute_assignment(settings, executor, assignment):
         # Never report resource release if we cannot confirm local cleanup.
         if backend:
             try:
-                await backend.cleanup()
+                cleanup = asyncio.create_task(backend.cleanup())
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    # Lease loss during cleanup must not interrupt container removal.
+                    interrupted = not lease.lost
+                    await asyncio.shield(cleanup)
             except (ExecutionError, httpx.HTTPError, OSError, TimeoutError):
                 raise ReportingFailed(f'Cleanup unresolved for attempt {assignment.attempt_id}; inspect its labeled container and controller reservation') from None
+    lease.check()  # Never turn lease-loss cleanup into a stale terminal report.
     if output:
         result.stdout_tail = output.stdout.text()
         result.stderr_tail = output.stderr.text()
         result.stdout_truncated = output.stdout.truncated
         result.stderr_truncated = output.stderr.truncated
-    view = await report(settings, assignment, 'result', result)
+    view = await report(settings, assignment, 'result', result, lease)
     logger.info('Attempt %s: %s (%s); controller recorded result and released allocation', view.id, view.state, view.failure_reason or 'exit 0')
     if interrupted:
         raise asyncio.CancelledError

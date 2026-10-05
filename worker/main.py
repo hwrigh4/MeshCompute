@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from worker.agent.loop import HeartbeatRejected, run_agent
 from worker.agent.claim import ClaimFailed, claim_once
+from worker.agent.leases import LeaseLost
 from worker.agent.execution import ReportingFailed, work_once
 from worker.config import WorkerSettings
 from worker.executors.container import ContainerExecutor
@@ -48,7 +49,7 @@ def main() -> None:
             print(assignment.model_dump_json(indent=2) if assignment else "No work (204)")
         else:
             asyncio.run(serve(settings, execute=args.action == "work-once"))
-    except (HeartbeatRejected, ClaimFailed, ReportingFailed) as exc:
+    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost) as exc:
         raise SystemExit(str(exc)) from None
     logging.info("Worker stopped")
 

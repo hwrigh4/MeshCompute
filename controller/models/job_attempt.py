@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, String, CheckConstraint, DateTime, Enum, ForeignKey, Integer, UniqueConstraint, func
+from sqlalchemy import Boolean, String, CheckConstraint, DateTime, Enum, ForeignKey, Integer, Index, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.schemas.states import AttemptState
@@ -11,6 +11,8 @@ from controller.models.base import Base
 class JobAttempt(Base):
     __tablename__ = "job_attempts"
     __table_args__ = (
+        Index('ix_job_attempts_state_lease', 'state', 'lease_expires_at'),
+        CheckConstraint("state NOT IN ('LEASED', 'RUNNING') OR lease_expires_at IS NOT NULL", name='ck_active_attempt_lease'),
         UniqueConstraint("job_id", "attempt_number", name="uq_job_attempt_number"),
         CheckConstraint("container_engine IS NULL OR container_engine IN ('podman', 'docker')", name="ck_attempt_engine"),
         CheckConstraint("octet_length(stdout_tail) <= 65536 AND octet_length(stderr_tail) <= 65536", name="ck_attempt_log_bytes"),

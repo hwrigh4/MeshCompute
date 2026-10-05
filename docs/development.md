@@ -1,4 +1,4 @@
-# Local functional lab (Phases 4.5 and 5)
+# Local functional lab (Phases 4.5–6)
 
 This Linux development lab uses real APIs, authentication, PostgreSQL transactions,
 and the allocation ledger. Phase 4.5 scheduler fixtures simulate worker hardware;
@@ -156,7 +156,7 @@ reconciliation or recovery.
 
 Stop background agents and heartbeat loops before running these commands. Each
 selected scheduler scenario starts with a full explicit development reset, because
-its claim-only allocations never expire or complete:
+the fixtures require deterministic empty starting state (diagnostic leases now expire):
 
 ```bash
 make test-scheduler YES=1
@@ -352,9 +352,11 @@ make test-real-worker             # one-shot: requires a clean lab
 ```
 
 The runtime aggregate is repeatable without changing scheduler state. The
-assignment aggregate (and thus `test-local`) needs a clean lab on rerun: Phase 4
-diagnostic reservations never expire or complete. Inspect results, stop agents, and use the
-explicit reset procedure below only when existing data can be deleted.
+assignment aggregate (and thus `test-local`) needs a clean lab on rerun. Its
+diagnostic claim does not renew; after about 30 seconds plus a recovery scan the
+reservation is released and this max-attempts=1 job fails. The diagnostic helper
+still requires empty attempt history; inspect results and use a separate clean
+lab or explicitly reset disposable data before rerunning it.
 
 These helpers currently target a local controller. Future remote functional
 testing requires its own explicit configuration and safeguards; the existing
@@ -456,11 +458,14 @@ triggers persisted-state inspection; if inspection is unavailable, run
 `make dev-state` before deciding what to do next. Interruptions may also leave a
 queued or assigned job. This is diagnostics, not reconciliation.
 
-Results remain for inspection. A second test run intentionally refuses the dirty
-lab: claim-only allocations never expire or complete. **Stopping the real worker
-does not release reservations.** To repeat, first inspect results, stop the worker
-with Ctrl-C in Terminal 2, then explicitly run `make dev-reset` only if all local
-work can be deleted. Reset removes simulated and real credential files. Restart
+Results remain for inspection. A second diagnostic run refuses existing attempt
+history as well as active jobs/reservations.
+This diagnostic claim does not renew: its lease expires and controller recovery
+releases the reservation. **Stopping a heartbeat worker does not itself release
+reservations.** Inspect `make dev-state` after recovery. Use a separate clean
+lab for another diagnostic, or explicitly `make dev-reset` only if all local
+work can be deleted; stop agents first. Reset removes simulated, real, and recovery credential
+files. After a reset, restart
 `make dev-real-worker` (new identity) and repeat the test. For a database reset
 performed outside the helper, stop the agent and remove only the stale
 `.meshcompute-lab/real-worker.json` after confirming the reset and DB/URL pairing.
@@ -495,9 +500,10 @@ for the memory-over-limit case) on a real worker contributing 1 CPU / 256 MiB.
 It uses the existing protected real-worker identity and helper locks. It refuses
 active jobs/reservations and a running heartbeat helper, never resets data, and
 checks images before submitting. Terminal history is allowed: successful runs
-can be repeated without reset. An old assignment-only test leaves a reservation;
-inspect it and choose a separate lab, or explicitly reset disposable data after
-stopping agents. **Stopping a heartbeat agent does not release reservations.**
+can be repeated without reset. An assignment-only reservation now expires; wait
+for controller recovery and inspect it before proceeding. Pre-Phase6 unleased
+reservations require inspection before migration, not invented lease deadlines.
+**Stopping a heartbeat agent does not itself release reservations.**
 
 The scenarios cover success, intentional exit 7 with stderr, sleep timeout, CPU
 burn, memory hold, bounded memory exhaustion, deterministic Monte Carlo output,
@@ -629,7 +635,8 @@ Worker-authenticated endpoints use the existing worker ID and bearer token:
 
 - `POST /v1/workers/{worker_id}/attempts/{attempt_id}/start` with
   `{"container_engine":"podman"}` authorizes LEASED → RUNNING and records start
-  timestamps. Repeating it with the same engine returns the existing timestamps.
+  timestamps. Repeating it with the same engine returns the existing timestamps
+  only while the lease remains valid.
 - `POST /v1/workers/{worker_id}/attempts/{attempt_id}/result` records state,
   engine, exit code, stable failure reason, bounded output, and truncation flags.
   The exact same terminal report is idempotent; conflicting outcomes or fields
@@ -652,11 +659,11 @@ result reporting; unresolved cleanup keeps the reservation and emits inspection
 guidance rather than assuming the workload is gone.
 
 Ctrl-C/SIGTERM during execution cleans up the current container and attempts a
-FAILED/WORKER_INTERRUPTED result. SIGKILL, host loss, unavailable engines, or
-unresolved controller communication can still leave a reservation stuck. No lease
-renewal/expiry, retry/requeue, reconciliation, provider preemption, or running-job
-cancellation is implemented. `max_attempts` remains stored but unused: even 3
-allows only this one Phase 5 attempt. Those recovery behaviors belong to Phase 6.
+FAILED/WORKER_INTERRUPTED result while ownership remains valid. Phase 6 now
+recovers expired reservations after SIGKILL, host loss, or unresolved controller
+communication. Only LOST attempts are retryable; ordinary Phase 5 failures remain
+terminal even with `max_attempts=3`. Lease loss cleans up without reporting
+WORKER_INTERRUPTED. No provider preemption or reconciliation is implemented.
 For shutdown, stop the worker and controller with Ctrl-C, then optionally
 `make dev-down COMPOSE=podman-compose`; the database volume remains.
 
@@ -675,3 +682,108 @@ Run this only on a separate disposable database, before creating execution histo
 Migration 0005 adds bounded attempt results without changing earlier migrations.
 Downgrade refuses non-LEASED attempt history because Phase 4 cannot represent it;
 never discard existing results automatically to make a migration check pass.
+
+
+## Phase 6 leases and failure recovery
+
+Claims atomically reserve resources and create a 30-second ownership lease.
+Assignments and authenticated `POST /v1/workers/{worker_id}/attempts/{attempt_id}/renew`
+responses include `lease_expires_at`, `lease_duration_seconds`, and
+`renew_after_seconds` (10). Timing policy lives in
+`controller/services/lease_policy.py`. The attempt read API includes the deadline.
+
+The controller uses PostgreSQL time after acquiring worker → job → attempt locks.
+Start, renew, and active result reports return HTTP 409 at or after expiry, even
+before the reaper runs. Identical already-recorded terminal reports remain
+idempotent after their historical deadline. Workers cannot report LOST or
+LEASE_EXPIRED. Heartbeat freshness measures worker health; it never renews an
+attempt or substitutes for ownership.
+
+A FastAPI lifespan task scans persisted active deadlines every five seconds,
+re-locks/re-checks each candidate, then atomically marks LOST/LEASE_EXPIRED,
+sets completion time, deletes the allocation, and either requeues the job or
+fails it. Competing controllers serialize through database locks; no in-memory
+ownership state is required. Shutdown cancels and awaits the task and its bounded
+DB scan. Restart immediately scans persisted deadlines without waiting for a
+worker, claim, or manual recovery request.
+
+Only LOST attempts consume the retry policy: if the highest attempt number is
+below `max_attempts`, the job becomes QUEUED with a null completion time. The
+next normal claim creates the next attempt; claim also defensively enforces the
+limit. At exhaustion the job becomes FAILED. Job `started_at` retains its first
+actual start; a never-started LEASED attempt can leave it null. Normal failure,
+timeout, image, policy, and interruption results remain terminal without retry.
+
+The worker starts its lease keeper immediately after claim, before image work,
+and renews through execution, capture, cleanup, and terminal reporting. It uses
+a conservative monotonic deadline anchored to request-send time, with timings
+from the protocol, so network latency cannot extend its local ownership. Transient
+renew failures retry at a bounded cadence. Rejection or deadline expiry cancels
+execution and removes only the current attempt's owned container. It sends no
+stale terminal result and makes no assumption that the controller has released
+the allocation. Claim requests themselves are still never blindly retried.
+
+Hard death can leave a provider-side orphan running after controller recovery:
+the controller cannot reach into an unavailable provider engine. The orphan may
+exit naturally or stop with its engine/host. Retries can overlap it: execution is
+**at least once**, not exactly once. Worker reconciliation belongs to Phase 8;
+provider preemption belongs to Phase 7. Neither is implemented here.
+
+### Recovery validation
+
+This suite needs real PostgreSQL, a migrated idle local lab, and the existing
+success/sleep images on a real Podman or Docker API. Stop other controllers and
+agents for this database first. Unlike `test-execution`, `test-recovery` owns a
+short-lived controller child so it can safely test shutdown/restart; an occupied
+controller port is rejected. It never stops unrelated processes or resets data.
+
+```bash
+# Stop the normal foreground controller/agents with Ctrl-C first.
+make dev-db-up COMPOSE=podman-compose
+make dev-migrate
+make examples-build-podman             # explicit, only if needed
+make dev-state                        # database inspection works without controller
+make test-recovery
+make dev-state                        # retained terminal attempts, including LOST
+# Return to the ordinary lab afterward:
+make dev-up COMPOSE=podman-compose
+```
+
+Use `.venv/bin/python -m local_test.recovery --engine podman` (or `docker`) to
+require a particular engine; default auto prefers Podman. Tests run sequentially
+and use 0.5 CPU / 128 MiB workloads, with real workers contributing 1 CPU / 256 MiB.
+Allow several minutes. Recovery identities use the same protected atomic storage
+conventions in `.meshcompute-lab/recovery-workers.json`; no production credential
+persistence changed. A successful run can be repeated with terminal history.
+Failures preserve state; inspect it and wait for recovery or explicitly reset
+only disposable data. Ctrl-C stops owned children; no automatic state reset.
+
+| Check | Evidence |
+| --- | --- |
+| Renewal | Real 40-second sleep crosses its initial lease while RUNNING, deadline advances, heartbeat stays healthy, allocation remains until success |
+| LEASED expiry | Diagnostic claim plus test-only SQL backdating; LOST, no allocation, QUEUED despite fresh real heartbeats |
+| Hard death/retry | SIGKILL an owned real worker after renewal; LOST then a different worker executes attempt 2 successfully; test-owned orphan inspected and removed by matching label |
+| Exhaustion | Two expired claims with max_attempts=2 end FAILED; no third attempt |
+| Expiry authority/auth | Wrong/missing credentials rejected; stale renew/start/result cannot revive an expired attempt; stale result cannot alter attempt 2; workers cannot forge LOST |
+| Restart | Owned controller stopped, persisted lease backdated; real ASGI endpoints without lifespan prove rejection before reaping; restarting the controller recovers automatically |
+| Result/recovery ordering | API-only result fixture wins before recovery and survives historical expiry; competing DB recovery transactions preserve LOST against later result |
+| Lease loss on worker | Controller outage reaches the monotonic deadline; a separate real workload gets explicit renewal rejection. Both remove their containers without stale terminal reports |
+
+Backdating and direct API result fixtures are explicitly test setup, not simulated
+engine validation. The real execution paths use production CLI/engine adapters.
+The harness removes only its strictly labeled orphan fixtures; successful results
+and LOST history remain in PostgreSQL. Existing `make test-scheduler` (explicit
+reset) and `make test-execution` remain separate commands and retain their checks.
+The optional Crostini `NETAVARK_FW=iptables` workaround above remains per-command,
+not a global default. All controller/database guards stay localhost-only.
+
+### Phase 6 migration
+
+Migration 0006 adds the `(state, lease_expires_at)` recovery index and requires a
+non-null deadline for active LEASED/RUNNING attempts. It deliberately fails if
+pre-Phase6 active unleased attempts exist. Stop old controllers/workers and
+inspect their reservations; use a separate database or explicitly reset a
+confirmed disposable lab. No deadlines are invented for ambiguous old ownership.
+Existing terminal history and saved identities remain compatible. Downgrade
+refuses active leases or LOST history; test upgrade/check/downgrade 0004/upgrade/
+check only on a separate empty disposable database, using the commands above.

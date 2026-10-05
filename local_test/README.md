@@ -1,4 +1,4 @@
-# Local functional tests (Phases 4.5 and 5)
+# Local functional tests (Phases 4.5–6)
 
 This repo-root Python package holds MeshCompute's local functional testing tools.
 It keeps these kinds of validation distinct:
@@ -68,12 +68,14 @@ Individual commands remain available: `make check-engines`, `make examples-check
 
 Sources and Containerfiles remain in `examples/`. Saved credentials and locks
 remain in the gitignored `.meshcompute-lab/`, with the same identities and file
-format, directory mode 0700, and credential mode 0600. No state migration is needed.
+format, directory mode 0700, and credential mode 0600. Saved identity formats remain compatible; see the Phase 6 database migration guard.
 Tokens are never printed or passed as command arguments.
 
 Assignment results stay in PostgreSQL for `make dev-state`. A rerun requires a
-clean lab because Phase 4 reservations never expire or complete. Stopping a
-worker **does not release reservations**. After inspecting results, stop agents
+clean lab. Diagnostic claims do not renew: Phase 6 expires their leases and
+releases reservations automatically. Stopping a worker **does not itself release
+reservations**. Inspect state after recovery. The diagnostic helper still
+requires empty attempt history, unlike execution/recovery suites. After inspecting results, stop agents
 with Ctrl-C and run `make dev-reset` only if all existing local lab data can be
 deleted; then restart `make dev-real-worker`, wait for HEALTHY, and retest.
 Never blindly retry an ambiguous claim: inspect persisted state first.
@@ -110,13 +112,14 @@ The helper defaults to `auto` (Podman preferred, Docker fallback). Use
 `.venv/bin/python -m local_test.execution --engine podman --scenario success`
 for one check, or `--engine docker` for Docker. It refuses queued/running work and
 reservations, builds/pulls nothing, and never resets data. Existing terminal
-history is compatible with reruns. Old assignment-only reservations require
-inspection and a separate lab or an explicit disposable-data reset.
+history is compatible with reruns. Diagnostic reservations now expire; inspect
+state before rerunning. Old unleased reservations require inspection before migration.
 
 `make dev-work-once` executes one manually submitted job using the protected real
 identity. Production `mesh-worker work-once` takes credentials only through the
 environment, sends heartbeats, claims once, executes, reports, and exits. No
-separate heartbeat process is required. `max_attempts` does not cause retries.
+separate heartbeat process is required. Only LOST attempts retry up to `max_attempts`;
+ordinary execution failures remain terminal.
 Inspect the printed attempt through `GET /v1/attempts/{id}` or `make dev-state`.
 See the [execution workflow and limits](../docs/development.md#phase-5-container-execution)
 for security policy, output limits, failure handling, migrations, and shutdown.
@@ -137,3 +140,36 @@ worker terminal reporting. The oversized-request check subsequently executes its
 success job; the collision fixture is removed only after preservation is proven.
 See [scenario details](../docs/development.md#phase-51-failure-path-checks) for
 expected states, real-engine versus fixture behavior, and cleanup.
+
+
+## Phase 6 recovery
+
+`make test-recovery` tests leases against real PostgreSQL and a real engine. Stop
+other controllers/agents for the lab first: this helper owns a temporary
+controller so it can test restart safely, and refuses an occupied port. It never
+resets data, installs software, or builds images.
+
+```bash
+make dev-db-up COMPOSE=podman-compose
+make dev-migrate
+make dev-state
+make test-recovery
+make dev-state
+```
+
+Build success/sleep images explicitly if missing. `--engine podman` or `--engine
+docker` on `python -m local_test.recovery` requires that engine. Checks cover a
+40-second renewed workload, expired diagnostic claim with fresh heartbeat,
+SIGKILL and retry on a second worker, exhausted attempts, stale/authenticated
+requests, competing recovery transactions, terminal replay, controller restart,
+and local termination after connectivity loss. SQL backdating and direct API
+fixtures are labeled separately from real-engine behavior. Results stay in the
+DB; protected recovery identities stay in `.meshcompute-lab/recovery-workers.json`.
+
+Heartbeats do not renew leases. Leases last 30 seconds, renew every 10, and are
+recovered by the controller about every 5. Only LOST attempts requeue while
+attempts remain. Stale workers cannot mutate expired assignments. Hard death can
+leave an orphan provider container and overlapping retry execution: this is
+at-least-once behavior. The harness cleans only its labeled orphan fixtures;
+production reconciliation and provider preemption remain deferred. See
+[recovery details](../docs/development.md#phase-6-leases-and-failure-recovery).

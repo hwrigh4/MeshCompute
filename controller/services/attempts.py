@@ -1,10 +1,11 @@
-from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.schemas.leases import LeaseRenewal
+from controller.services.lease_policy import ACTIVE_ATTEMPTS, controller_now, deadline, timing
 from common.schemas.attempts import AttemptResult, AttemptStart
 from common.schemas.states import AttemptState, JobState
 from controller.models.job import Job
@@ -12,7 +13,7 @@ from controller.models.job_attempt import JobAttempt
 from controller.models.worker import Worker
 from controller.models.worker_allocation import WorkerAllocation
 
-TERMINAL = {AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT}
+TERMINAL = {AttemptState.SUCCEEDED, AttemptState.FAILED, AttemptState.TIMED_OUT, AttemptState.LOST}
 
 
 def locked(session: Session, worker_id: UUID, attempt_id: UUID):
@@ -30,11 +31,11 @@ def locked(session: Session, worker_id: UUID, attempt_id: UUID):
 
 def start(session, worker_id, attempt_id, payload: AttemptStart):
     attempt, job = locked(session, worker_id, attempt_id)
+    now = require_live_lease(session, attempt)
     if attempt.state == AttemptState.RUNNING and attempt.container_engine == payload.container_engine:
         return attempt
     if attempt.state != AttemptState.LEASED or job.state != JobState.RUNNING:
         raise HTTPException(409, 'Attempt cannot start in its current state')
-    now = datetime.now(timezone.utc)
     attempt.state = AttemptState.RUNNING
     attempt.container_engine = payload.container_engine
     attempt.started_at = now
@@ -53,6 +54,7 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
         if all(getattr(attempt, key) == value for key, value in values.items()):
             return attempt
         raise HTTPException(409, 'Conflicting terminal result')
+    now = require_live_lease(session, attempt)
     if (job.state != JobState.RUNNING
             or attempt.state not in {AttemptState.LEASED, AttemptState.RUNNING}
             or (attempt.state == AttemptState.LEASED and payload.state != AttemptState.FAILED)
@@ -63,7 +65,6 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
         raise HTTPException(409, 'Active attempt has no allocation; inspect controller state')
     for key, value in values.items():
         setattr(attempt, key, value)
-    now = datetime.now(timezone.utc)
     attempt.completed_at = now
     job.state = JobState.SUCCEEDED if payload.state == AttemptState.SUCCEEDED else JobState.FAILED
     job.completed_at = now
@@ -71,3 +72,22 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
     session.commit()  # Result, job, and accounting are one transaction.
     session.refresh(attempt)
     return attempt
+
+
+def require_live_lease(session, attempt):
+    now = controller_now(session)
+    if (attempt.state not in ACTIVE_ATTEMPTS or attempt.lease_expires_at is None
+            or now >= attempt.lease_expires_at):
+        raise HTTPException(409, 'Attempt lease is expired or no longer active')
+    return now
+
+
+def renew(session, worker_id, attempt_id):
+    attempt, job = locked(session, worker_id, attempt_id)
+    now = require_live_lease(session, attempt)
+    if job.state != JobState.RUNNING:
+        raise HTTPException(409, 'Job is no longer running')
+    attempt.lease_expires_at = deadline(now)
+    result = LeaseRenewal(attempt_id=attempt.id, **timing(attempt.lease_expires_at))
+    session.commit()
+    return result

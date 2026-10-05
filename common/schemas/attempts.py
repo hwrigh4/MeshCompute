@@ -1,4 +1,4 @@
-"""Bounded worker reports; no lease/retry protocol."""
+"""Bounded worker reports; LOST/LEASE_EXPIRED are controller-only outcomes."""
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
