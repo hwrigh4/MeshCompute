@@ -16,14 +16,34 @@ MeshCompute runs non-sensitive container jobs on provider-owned Linux machines. 
 ## How it fits together
 
 ```mermaid
-flowchart TD
-    R[Requester] -->|Submit and inspect jobs| C[FastAPI controller]
-    C -->|State and reservations| D[(PostgreSQL)]
-    W[Linux worker] -->|Outbound HTTP: claim, renew, report| C
-    P[Provider controls] -->|Local participation and reclaim| W
-    W -->|Unix socket| E[Podman or Docker]
-    E -->|Restricted execution| J[Job container]
+flowchart TB
+    R["Requester: submits a job"]
+
+    subgraph CP["Control plane — coordinates work"]
+        C["Controller: API, scheduler and leases"]
+        D[("PostgreSQL: jobs, attempts and reservations")]
+        C -->|Read and write state| D
+    end
+
+    subgraph HOST["Provider's Linux machine — executes work"]
+        P["Provider: controls participation"]
+        W["Worker agent"]
+        E["Container engine: Podman or Docker"]
+        J["Restricted job container"]
+
+        P -->|Pause, drain or stop-all| W
+        W -->|Start, monitor and clean up| E
+        E -->|Run with CPU and memory limits| J
+    end
+
+    R -->|Submit job; check result| C
+    W -->|Request work; send heartbeats and results| C
+    C -.->|Return assignment and lease| W
 ```
+
+**Read this as two areas:** the control plane decides who may run a job and records its state; the provider's machine runs the actual workload. The dashed arrow is a response to a worker request. Workers initiate every controller connection, including lease renewals; the controller needs no inbound access to provider machines.
+
+The provider's controls stay local and can reclaim resources even when the controller is unavailable. One provider machine is shown; each additional machine runs its own worker and container engine. These are logical boundaries—in the local lab, the controller, database and worker can all run on the same host.
 
 1. A requester submits an image, command, CPU/memory request and timeout.
 2. A healthy worker asks for work; the controller atomically reserves capacity for the oldest compatible fitting queued job.
