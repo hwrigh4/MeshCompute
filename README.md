@@ -8,6 +8,7 @@ is the product and architecture source of truth.
 - [MeshCompute at a glance](docs/architecture/README.md): quick architecture and operations reference.
 - [Architecture guide](docs/architecture/architecture.md): components, state, scheduling, execution and recovery.
 - [Operations runbook](docs/architecture/operations.md): setup, commands, troubleshooting and validation.
+- [API reference](docs/api.md): controller endpoints, authentication, schemas, leases, and reconciliation.
 - [PDF downloads](docs/architecture/README.md#read-more).
 
 These guides describe implementation baseline `f77645a` and identify differences
