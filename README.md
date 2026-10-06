@@ -3,6 +3,17 @@
 MeshCompute coordinates preemptible compute contributed by providers. `PROJECT.md`
 is the product and architecture source of truth.
 
+## Documentation
+
+- [MeshCompute at a glance](docs/architecture/README.md): quick architecture and operations reference.
+- [Architecture guide](docs/architecture/architecture.md): components, state, scheduling, execution and recovery.
+- [Operations runbook](docs/architecture/operations.md): setup, commands, troubleshooting and validation.
+- [PDF downloads](docs/architecture/README.md#read-more).
+
+These guides describe implementation baseline `f77645a` and identify differences
+from the intended design. Some phase-specific notes below describe earlier stages;
+use the guides for a consolidated view of current behavior at that baseline.
+
 Phases 1–4 implement the FastAPI/PostgreSQL controller, Linux worker heartbeats,
 Podman/Docker capability detection, a persisted job queue, and atomic worker-pull
 assignment with resource reservations. Phase 5 adds restricted container execution,
