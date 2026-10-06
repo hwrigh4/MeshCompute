@@ -1,9 +1,12 @@
 from uuid import UUID
+import logging
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from controller import metrics
+from common.logging import event, attempt_context
 from common.schemas.leases import LeaseRenewal
 from controller.services.lease_policy import ACTIVE_ATTEMPTS, controller_now, deadline, timing
 from controller.services.retry import retry_or_fail
@@ -42,8 +45,11 @@ def start(session, worker_id, attempt_id, payload: AttemptStart):
     attempt.started_at = now
     if job.started_at is None:
         job.started_at = now
+    context = attempt_context(attempt)
     session.commit()
     session.refresh(attempt)
+    metrics.started.labels(payload.container_engine).inc()
+    event(metrics.logger, "attempt.started", **context)
     return attempt
 
 
@@ -63,6 +69,8 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
         raise HTTPException(409, 'Result incompatible with attempt state or engine')
     allocation = session.get(WorkerAllocation, attempt.id)
     if allocation is None:
+        metrics.invariants.labels('result').inc()
+        event(metrics.logger, 'allocation.missing', level=logging.WARNING, **attempt_context(attempt))
         raise HTTPException(409, 'Active attempt has no allocation; inspect controller state')
     for key, value in values.items():
         setattr(attempt, key, value)
@@ -73,8 +81,10 @@ def complete(session, worker_id, attempt_id, payload: AttemptResult):
         job.state = JobState.SUCCEEDED if payload.state == AttemptState.SUCCEEDED else JobState.FAILED
         job.completed_at = now
     session.delete(allocation)
+    observation = metrics.terminal_snapshot(attempt, job)
     session.commit()  # Result, job, and accounting are one transaction.
     session.refresh(attempt)
+    metrics.attempt_terminal(*observation)
     return attempt
 
 
@@ -94,4 +104,6 @@ def renew(session, worker_id, attempt_id):
     attempt.lease_expires_at = deadline(now)
     result = LeaseRenewal(attempt_id=attempt.id, **timing(attempt.lease_expires_at))
     session.commit()
+    metrics.renewals.inc()
+    event(metrics.logger, "lease.renewed", level=logging.DEBUG, worker_id=worker_id, attempt_id=attempt_id)
     return result

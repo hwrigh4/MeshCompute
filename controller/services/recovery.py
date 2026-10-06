@@ -9,6 +9,8 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from controller import metrics
+from common.logging import event, attempt_context
 from common.schemas.states import AttemptState, JobState
 from controller.database import get_engine
 from controller.models.job_attempt import JobAttempt
@@ -41,13 +43,20 @@ def recover_one(engine, worker_id, attempt_id):
         allocation = session.get(WorkerAllocation, attempt.id)
         if allocation is not None:
             session.delete(allocation)
+        else:
+            metrics.invariants.labels("recovery").inc()
+            event(logger, "allocation.missing", level=logging.WARNING, **attempt_context(attempt))
         if job.state == JobState.RUNNING:
             retry_or_fail(session, job, now)
+        observation = metrics.terminal_snapshot(attempt, job)
         session.commit()  # LOST, job retry decision, and ledger release are atomic.
+        metrics.attempt_terminal(*observation)
+        metrics.recovery_attempts.labels("requeued" if observation[1].state == JobState.QUEUED else "exhausted").inc()
         return True
 
 
 def recover_expired(stop=None):
+    metrics.recovery_runs.inc()
     engine = get_engine()
     with Session(engine) as session:
         session.execute(text("SET LOCAL statement_timeout = '5s'"))
@@ -61,6 +70,7 @@ def recover_expired(stop=None):
         try:
             recovered += recover_one(engine, worker_id, attempt_id)
         except SQLAlchemyError:
+            metrics.recovery_failures.inc()
             logger.warning('Lease recovery transaction unavailable; will retry on a later scan')
     return recovered
 
@@ -79,5 +89,6 @@ async def recovery_loop():
                 await scan  # Do not leave a DB thread mutating after shutdown.
             raise
         except SQLAlchemyError:
+            metrics.recovery_failures.inc()
             logger.warning('Lease recovery scan unavailable; will retry')
         await asyncio.sleep(RECOVERY_INTERVAL_SECONDS)

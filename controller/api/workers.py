@@ -1,10 +1,12 @@
 from typing import Annotated
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from common.logging import event
 from common.auth.tokens import issue_worker_token
 from common.schemas.assignments import ClaimRequest, WorkAssignment
 from common.schemas.workers import (
@@ -54,6 +56,7 @@ def heartbeat(
 ) -> WorkerStatus:
     # Serialize contribution changes with claims using the same worker row lock.
     session.refresh(worker, with_for_update=True)
+    old_state = worker.state
     worker.agent_version = payload.agent_version
     worker.last_heartbeat = datetime.now(timezone.utc)
     worker.state = payload.state
@@ -68,6 +71,8 @@ def heartbeat(
     worker.telemetry = payload.telemetry.model_dump()
     session.commit()
     session.refresh(worker)
+    if old_state != worker.state:
+        event(logging.getLogger(__name__), "worker.state_changed", worker_id=worker.id, state=worker.state)
     return worker_status(worker, datetime.now(timezone.utc))
 
 

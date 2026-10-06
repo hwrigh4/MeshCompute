@@ -223,3 +223,17 @@ authenticated, current lease/context check; LEASED preparation is not missing wo
 PAUSED/DRAINING and local offline stop-all retain priority. See
 [Phase 8 details](../docs/development.md#phase-8-reconciliation) for protocol,
 limits, legacy handling, at-least-once implications, and test setup.
+
+## Observability validation
+
+`make test-observability` reuses the recovery lab's owned-controller lifecycle,
+loopback guards, credential helpers and real engine. Keep PostgreSQL running,
+stop other lab controllers/agents, migrate and explicitly build images first.
+The test never resets data. It validates Prometheus parsing/cardinality, persisted
+gauges, real success/timeout/preemption, LOST recovery, missing-workload and
+orphan-cleanup signals, image-pull failure, idempotent counters and restart reset
+behavior. Missing-workload and lease backdating are explicit test fixtures;
+execution, preemption, orphan removal and failed image pull use the real engine.
+Results remain inspectable with `make dev-state`; the owned controller stops on
+exit. Restart `make dev-up` afterward. See [observability documentation](../docs/development.md#phase-9-logs-and-metrics)
+for `/metrics`, optional loopback worker metrics, structured logs and definitions.

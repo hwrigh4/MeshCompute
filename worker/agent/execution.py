@@ -4,9 +4,12 @@ from contextlib import suppress
 import logging
 import os
 import socket
+from time import monotonic
 
 import httpx
 
+from common.logging import event, attempt_context
+from worker import metrics
 from common.schemas.attempts import AttemptResult, AttemptStart, AttemptView
 from common.schemas.states import AttemptState
 from worker.agent.claim import claim_once
@@ -99,6 +102,8 @@ async def execute_leased(settings, executor, assignment, store, live):
 
 
 async def _execute_assignment(settings, executor, assignment, lease, live):
+    launched = None
+    context = dict(worker_id=settings.id, job_id=assignment.job_id, attempt_id=assignment.attempt_id)
     backend = None
     output = None
     result = AttemptResult(state=AttemptState.FAILED, failure_reason='ENGINE_UNAVAILABLE')
@@ -109,15 +114,20 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
         backend.worker_id = settings.id
         result.container_engine = backend.engine
         live.engine = backend.engine
+        event(logger, "engine.selected", engine=backend.engine, **context)
         image = await backend.ensure_image(assignment.image)
         # Create (without launching) allows policy validation before start reporting.
         await backend.create(assignment, image)
         output = await backend.logs()
-        await report(settings, assignment, 'start', AttemptStart(container_engine=backend.engine), lease)
+        started_view = await report(settings, assignment, 'start', AttemptStart(container_engine=backend.engine), lease)
+        event(logger, 'attempt.started', **attempt_context(started_view))
         lease.check()
         try:
             async with asyncio.timeout(assignment.timeout_seconds):
                 await backend.start()
+                launched = monotonic()
+                metrics.executions.labels(backend.engine).inc()
+                event(logger, "container.started", engine=backend.engine, **context)
                 observed(settings, assignment.attempt_id, True)
                 result.exit_code = await backend.wait()
             result.state = AttemptState.SUCCEEDED if result.exit_code == 0 else AttemptState.FAILED
@@ -151,6 +161,8 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
                     await asyncio.shield(cleanup)
             except (ExecutionError, httpx.HTTPError, OSError, TimeoutError):
                 raise ReportingFailed(f'Cleanup unresolved for attempt {assignment.attempt_id}; inspect its labeled container and controller reservation') from None
+        if launched is not None:
+            metrics.execution_time.labels(backend.engine).observe(monotonic() - launched)
         observed(settings, assignment.attempt_id, False)
         live.cleaned = True
         live.cleanup_done.set()
@@ -170,7 +182,7 @@ async def _execute_assignment(settings, executor, assignment, lease, live):
         result.stdout_truncated = output.stdout.truncated
         result.stderr_truncated = output.stderr.truncated
     view = await report(settings, assignment, 'result', result, lease)
-    logger.info('Attempt %s: %s (%s); controller recorded result and released allocation', view.id, view.state, view.failure_reason or 'exit 0')
+    event(logger, 'attempt.result_confirmed', **attempt_context(view))
     if interrupted:
         raise asyncio.CancelledError
     return view
@@ -196,7 +208,7 @@ async def work_once(settings, executor):
             if assignment is None:
                 logger.info('No work (local controls or controller 204)')
                 return None
-            logger.info('Claimed job %s / attempt %s', assignment.job_id, assignment.attempt_id)
+            event(logger, 'attempt.claimed', worker_id=settings.id, job_id=assignment.job_id, attempt_id=assignment.attempt_id)
             return await execute_assignment(settings, executor, assignment)
         task = asyncio.create_task(work())
         try:

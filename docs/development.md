@@ -977,7 +977,7 @@ claim a reservation was released: an orphan with no live executor is resolved
 server-side by lease recovery. Unavailable engines cannot guarantee local reclaim.
 Legacy containers without a worker label still require ownership verification.
 Hard-death/partition overlap remains possible until cleanup: execution is at least
-once. There is no exactly-once guarantee, result outbox, or Phase 9 instrumentation.
+once. There is no exactly-once guarantee or result outbox. Phase 9 instrumentation is described below.
 
 ### Reconciliation validation
 
@@ -1013,3 +1013,129 @@ For manual shutdown use Ctrl-C, then optionally `make dev-down COMPOSE=podman-co
 stopping services does not erase their volumes. Run `make test-scheduler YES=1`
 only in an explicitly disposable lab, and run `make test-execution`,
 `make test-recovery`, and `make test-provider` separately with their existing setup.
+
+## Phase 9: logs and metrics
+
+Install the updated project dependencies in the development virtual environment.
+The controller exposes Prometheus text at `GET /metrics` without requiring a
+Prometheus server:
+
+```bash
+curl --fail http://127.0.0.1:8000/metrics
+```
+
+Like the other unauthenticated local-MVP read APIs, this endpoint belongs on
+localhost; do not expose it to the internet. `/health` stays independent and
+lightweight. A failed metrics database query returns 503 without collecting
+metrics from `/health`.
+
+Current-state gauges come from PostgreSQL aggregates on every scrape. There are
+two aggregate queries in one repeatable-read snapshot, each with a two-second
+statement timeout. Result cardinality is fixed; database work still grows with
+table size and should be profiled before a large deployment. Scrapes never fetch
+all ORM rows or change scheduling state.
+
+| Metric family (all prefixed `meshcompute_`) | Meaning |
+| --- | --- |
+| `workers`, `worker_heartbeat_age_seconds` | Count and maximum heartbeat age by effective state, including staleness; age is zero for workers without a heartbeat |
+| `worker_cpu_{contributed,reserved,allocatable}` | Aggregate logical CPUs by effective state |
+| `worker_memory_{contributed,reserved,allocatable}_bytes` | Aggregate bytes by effective state |
+| `jobs` | Current job counts by persisted state |
+| `jobs_submitted_total`, `jobs_completed_total` | Committed submissions/terminal transitions |
+| `job_queue_duration_seconds` | Creation to first committed assignment, once per job; excludes later retry queue waits |
+| `job_total_duration_seconds` | Creation to terminal job recording, including retry time |
+| `attempts_total`, `attempts_started_total`, `attempt_runtime_seconds` | Terminal outcomes, first confirmed starts, start-report to terminal recording (includes cleanup/reporting latency) |
+| `claim_requests_total`, `claim_assignments_total`, `claim_no_work_total`, `claim_duration_seconds` | Requests (including auth rejection), assignments, bounded broad no-work reasons, HTTP latency |
+| `lease_renewals_total`, `lease_renewal_failures_total` | Committed renewals and rejected/failed renewal requests |
+| `attempts_lost_total`, `recovery_runs_total`, `recovery_attempts_total`, `recovery_failures_total` | LOST reasons, scans, recovered requeued/exhausted attempts and scan/transaction errors |
+| `invariant_issues_total` | Missing allocation encountered by result/recovery handling; also emits a warning |
+| `preemptions_total` | Committed PREEMPTED outcomes, requeued or exhausted |
+| `reconciliation_runs_total`, `reconciliation_failures_total`, `reconciliation_duration_seconds`, `reconciliation_missing_workloads_total` | Controller snapshot requests/errors/latency and committed missing-workload outcomes |
+| `container_executions_total`, `container_execution_seconds` | Controller-recorded container exits and start-report-to-result duration; pre-start failures are excluded |
+
+Allocatable gauges sum each worker's contribution minus reservations, floored at
+zero **per worker**. Capacity on PAUSED/OFFLINE workers is still displayed in that
+state group; it is not schedulable capacity. Heartbeat freshness is independent
+of attempt ownership leases.
+
+Counters and histograms are process-local and reset when that process restarts.
+Idempotent duplicate start/result requests do not increment transition counters.
+They are operational signals, not an audit ledger: a crash just after commit can
+miss an event observation. Gauges remain database-derived across restarts.
+Multiple controller processes have separate counters but identical database
+views: do not sum the current-state gauges across replicas.
+
+### Worker-local observations
+
+Worker-only image pulls and actual container launches cannot be inferred from
+controller state. An optional worker scrape server binds **only 127.0.0.1**:
+
+```bash
+MESHCOMPUTE_WORKER_METRICS_PORT=9101 mesh-worker work-once
+# While the worker process is alive, in another terminal:
+curl --fail http://127.0.0.1:9101/metrics
+```
+
+The default is disabled. Choose a different port for each concurrent worker
+process; an occupied/invalid port fails clearly. The listener closes on exit;
+short work-once processes may finish between scrapes. Worker metrics include
+`image_pull_total`, `image_pull_failures_total` (cached images excluded),
+`container_executions_total` (confirmed launches), `container_execution_seconds`
+(launch through cleanup), and local reconciliation runs/failures/duration,
+confirmed orphan removals and missing-workload reports. Reconciliation retries
+are included in the duration of one pass. Keep worker and controller targets
+separate: similarly named counters describe different observation points.
+No telemetry is sent to the controller and no provider-control protocol is added.
+Local pause/resume/drain/resources/stop-all actions use structured logs.
+
+A minimal optional Prometheus configuration (no Grafana/Compose dependency):
+
+```yaml
+scrape_configs:
+  - job_name: meshcompute-controller
+    static_configs:
+      - targets: ['127.0.0.1:8000']
+  - job_name: meshcompute-worker
+    static_configs:
+      - targets: ['127.0.0.1:9101']
+```
+
+Prometheus must run on the same host for these loopback addresses. Select the
+appropriate `job` target in queries; do not combine controller recorded exits
+with worker launch counts. Example questions:
+`meshcompute_workers{state="HEALTHY"}`, `meshcompute_jobs{state="QUEUED"}`,
+`sum(rate(meshcompute_attempts_lost_total[5m]))`, and histogram queries against
+`meshcompute_job_queue_duration_seconds_bucket`.
+
+### Logging and cardinality
+
+Console logs use stable event names plus quoted `key=value` context. Set
+`MESHCOMPUTE_LOG_FORMAT=json` for JSON lines and `MESHCOMPUTE_LOG_LEVEL=DEBUG`
+for routine heartbeat/renewal details. Major transitions are INFO; lease loss,
+reconciliation failure and invariant problems are warnings. Relevant context
+includes worker/job/attempt IDs, attempt number, engine, state and failure reason.
+IDs belong in logs, **never Prometheus labels**. Metric labels use only finite
+states, engines and reason/outcome categories (plus histogram bucket boundaries).
+Worker names, images, commands and arbitrary error strings are never labels.
+
+Logs omit bearer tokens, credentials, raw request bodies, raw engine errors and
+workload output. Uvicorn raw access logging is disabled; metrics use fixed route
+templates. Inspect bounded workload output explicitly through the attempt API.
+These are application lifecycle logs, not full HTTP tracing.
+
+### Focused validation
+
+```bash
+make test-observability
+```
+
+As with `test-recovery`/`test-reconciliation`, start and migrate PostgreSQL first,
+stop the lab controller and helper agents, and build example images explicitly.
+This command owns its temporary controller, requires an idle localhost lab and a
+real available engine, never resets data, and preserves results. It checks real
+success/timeout/preemption, lease recovery using a test-only backdated deadline,
+missing-workload API fixtures, real owned orphan cleanup/image pull failure,
+Prometheus parsing, bounded labels, duplicate-result counter stability, logging
+redaction and restart behavior. The normal execution suite retains its full
+failure/security coverage. Use `make dev-state` afterward; restart `make dev-up`
+when finished. Phase 10 formal hardening remains deferred.

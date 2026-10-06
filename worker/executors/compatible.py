@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
+from worker import metrics
 from common.schemas.attempts import LOG_LIMIT
 
 
@@ -108,10 +109,13 @@ class CompatibleExecutor:
             raise ExecutionError(reason) from None
 
     async def ensure_image(self, image):
+        pulling = False
         path = '/images/' + quote(image, safe='') + '/json'
         try:
             response = await self.client.get(path)
             if response.status_code == 404:
+                pulling = True
+                metrics.pulls.labels(self.engine).inc()
                 # Stream pull progress with a bounded line buffer and total deadline.
                 async with asyncio.timeout(120):
                     async with self.client.stream('POST', '/images/create', params={'fromImage': image}, timeout=30) as pull:
@@ -131,11 +135,18 @@ class CompatibleExecutor:
                 response = await self.client.get(path)
             response.raise_for_status()
             info = response.json()
+            pulling = False
             # Image-declared volumes otherwise create unbounded anonymous storage.
             if info.get('Config', {}).get('Volumes'):
                 raise ExecutionError('SECURITY_POLICY_UNSUPPORTED')
             return info['Id']  # Pin this local image; don't race a retag before create.
+        except ExecutionError:
+            if pulling:
+                metrics.pull_failures.labels(self.engine).inc()
+            raise
         except (httpx.HTTPError, OSError, TimeoutError, ValueError, KeyError):
+            if pulling:
+                metrics.pull_failures.labels(self.engine).inc()
             raise ExecutionError('IMAGE_PULL_FAILED') from None
 
     async def create(self, assignment, image_id):

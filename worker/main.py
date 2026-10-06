@@ -7,6 +7,8 @@ from contextlib import suppress
 
 from pydantic import ValidationError
 
+from common.logging import configure_logging, event
+from worker import metrics
 from worker.agent.loop import HeartbeatRejected, run_agent
 from worker.agent.claim import ClaimFailed, claim_once
 from worker.agent.leases import LeaseLost
@@ -42,7 +44,7 @@ def main() -> None:
     if args.action != 'resources' and (args.cpu is not None or args.memory is not None):
         parser.error('--cpu/--memory require resources')
     local = args.action in ('status', 'pause', 'resume', 'drain', 'resources', 'stop-all')
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    configure_logging()
     logging.getLogger("httpx").setLevel(logging.WARNING)
     if sys.platform != "linux":
         raise SystemExit("The MeshCompute worker currently requires Linux")
@@ -51,8 +53,12 @@ def main() -> None:
     except ValidationError:
         # Never print configuration values, even in validation errors.
         raise SystemExit("Invalid worker configuration; check MESHCOMPUTE_WORKER_* settings") from None
-    logging.info("Starting worker %s", settings.id)
+    logger = logging.getLogger("worker.main")
+    event(logger, "worker.starting", worker_id=settings.id, action=args.action or "heartbeat")
+    server = None
     try:
+        if not local:
+            server = metrics.serve()
         if local:
             asyncio.run(command(settings, args.action, args.cpu, args.memory))
         elif args.action == "reconcile":
@@ -63,14 +69,20 @@ def main() -> None:
             print(assignment.model_dump_json(indent=2) if assignment else "No work (local controls or controller 204)")
         else:
             asyncio.run(serve(settings, execute=args.action == "work-once"))
-    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost, ControlError, ReconciliationFailed) as exc:
+    except (HeartbeatRejected, ClaimFailed, ReportingFailed, LeaseLost, ControlError, ReconciliationFailed, metrics.MetricsUnavailable) as exc:
+        event(logger, "worker.failed", level=logging.ERROR, worker_id=settings.id, action=args.action or "heartbeat", error_type=type(exc).__name__)
         raise SystemExit(str(exc)) from None
     except (OSError, TimeoutError, ValueError):
         message = 'Worker/control failed; inspect provider settings, permissions, and live agent.'
         if args.action == 'stop-all':
             message += ' Local cleanup is not confirmed.'
         raise SystemExit(message) from None
-    logging.info("Worker stopped")
+    finally:
+        if server:
+            server[0].shutdown()
+            server[0].server_close()
+            server[1].join(timeout=2)
+    event(logger, "worker.stopped", worker_id=settings.id)
 
 
 if __name__ == "__main__":

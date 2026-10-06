@@ -1,9 +1,13 @@
 """Conservative monotonic ownership tracking, independent of heartbeats."""
 import asyncio
+import logging
 
 import httpx
 
+from common.logging import event
 from common.schemas.leases import LeaseRenewal
+
+logger = logging.getLogger(__name__)
 
 
 class LeaseLost(RuntimeError):
@@ -21,6 +25,8 @@ class LeaseKeeper:
             self.ready.set()
 
     def lose(self):
+        if not self.lost:
+            event(logger, "lease.lost", level=logging.WARNING, worker_id=self.settings.id, job_id=self.assignment.job_id, attempt_id=self.assignment.attempt_id)
         self.lost = True
         self.ready.set()
 
@@ -60,6 +66,7 @@ class LeaseKeeper:
                         self.deadline = sent + renewal.lease_duration_seconds
                         self.check()
                         self.ready.set()
+                        event(logger, "lease.renewed", level=logging.DEBUG, worker_id=self.settings.id, attempt_id=self.assignment.attempt_id, job_id=self.assignment.job_id)
                         delay = max(0, sent + renewal.renew_after_seconds - loop.time())
                     elif response.status_code not in (408, 429) and response.status_code < 500:
                         self.lose()  # Includes auth failures and expired/terminal conflicts.

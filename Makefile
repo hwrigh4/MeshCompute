@@ -116,3 +116,8 @@ test-provider:
 .PHONY: test-reconciliation
 test-reconciliation:
 	$(PYTHON) -m local_test.reconciliation
+
+# Owns its controller; uses the same idle local lab and real engine guards.
+.PHONY: test-observability
+test-observability:
+	$(PYTHON) -m local_test.observability

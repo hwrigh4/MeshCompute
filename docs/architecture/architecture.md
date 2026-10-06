@@ -2,6 +2,9 @@
 
 Version 1.0 · 5 October 2026 · Implementation snapshot `f77645a5bc2ea6b5e456bd1b8bd99957db30d4a4`
 
+> This guide and its PDF describe the Phase 8 snapshot above. Phase 9 metrics and
+> structured logging are documented in [development](../development.md#phase-9-logs-and-metrics).
+
 ## 1. Purpose and scope
 
 MeshCompute coordinates non-sensitive container workloads on provider-owned Linux machines. A central controller records jobs, assigns temporary execution leases, and accounts for contributed CPU and memory. Workers initiate all controller communication and execute workloads through local Podman or Docker APIs.

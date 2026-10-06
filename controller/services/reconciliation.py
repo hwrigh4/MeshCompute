@@ -2,6 +2,7 @@
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from controller import metrics
 from common.schemas.reconciliation import MAX_ATTEMPTS, ReconcileAttempt, ReconcileView
 from common.schemas.states import AttemptState, JobState
 from controller.models.job_attempt import JobAttempt
@@ -45,6 +46,9 @@ def missing(session, worker_id, attempt_id, payload):
     attempt.completed_at = now
     session.delete(allocation)
     retry_or_fail(session, job, now)
+    observation = metrics.terminal_snapshot(attempt, job)
     session.commit()
     session.refresh(attempt)
+    metrics.attempt_terminal(*observation)
+    metrics.missing.labels("requeued" if observation[1].state == JobState.QUEUED else "exhausted").inc()
     return attempt

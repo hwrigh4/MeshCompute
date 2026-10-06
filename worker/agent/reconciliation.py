@@ -5,6 +5,7 @@ claims until its owner finishes or its lease expires. Unknown legacy containers
 without a worker label cannot be attributed safely and are left for inspection.
 """
 import asyncio
+from time import monotonic
 import json
 import logging
 from pathlib import Path
@@ -12,6 +13,8 @@ from uuid import UUID
 
 import httpx
 
+from worker import metrics
+from common.logging import event
 from common.schemas.reconciliation import MAX_ATTEMPTS, ReconcileView
 from worker.executors.container import engine_usable
 from worker.executors.compatible import ExecutionError
@@ -113,6 +116,19 @@ async def remove(container):
 
 
 async def reconcile(settings):
+    begin = monotonic()
+    metrics.reconciliations.inc()
+    try:
+        return await _bounded_reconcile(settings)
+    except Exception:
+        metrics.reconciliation_failures.inc()
+        event(logger, "reconciliation.failed", level=logging.WARNING, worker_id=settings.id)
+        raise
+    finally:
+        metrics.reconciliation_time.observe(monotonic() - begin)
+
+
+async def _bounded_reconcile(settings):
     # Engine socket activation/busy hosts can transiently fail a probe. Repeating
     # comparison/owned cleanup is safe; the actual claim is still sent only once.
     try:
@@ -174,7 +190,8 @@ async def _reconcile(settings):
                 if c['attempt'] != protected:
                     await remove(c)
                     reporting.discard(c['attempt'])
-                    logger.info('Reconciled stale container for attempt %s', c['attempt'])
+                    metrics.orphans.labels(c['engine']).inc()
+                    event(logger, 'reconciliation.orphan_removed', worker_id=settings.id, job_id=c['job'], attempt_id=c['attempt'], engine=c['engine'])
                 else:
                     remaining = True
             else:
@@ -196,7 +213,8 @@ async def _reconcile(settings):
             })
             if response.status_code != 409:
                 response.raise_for_status()
-                logger.info('Controller recorded missing workload %s', a.id)
+                metrics.missing.inc()
+                event(logger, 'reconciliation.workload_missing', worker_id=settings.id, job_id=a.job_id, attempt_id=a.id, engine=a.container_engine)
         # Re-read after mutations: only controller release permits fresh claims.
         final = await snapshot([])
         return not final.attempts and not remaining and protected is None
@@ -220,6 +238,8 @@ async def report_absence(settings, assignment):
                 })
                 if response.status_code != 409:
                     response.raise_for_status()
+                    metrics.missing.inc()
+                    event(logger, "reconciliation.workload_missing", worker_id=settings.id, job_id=a.job_id, attempt_id=a.id, engine=a.container_engine)
                 return
 
 

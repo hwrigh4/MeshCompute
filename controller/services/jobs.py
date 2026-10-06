@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from common.schemas.jobs import JobSubmission
 from common.schemas.states import JobState
 from controller.models.job import Job
+from controller import metrics
+from common.logging import event
 
 
 class JobNotFound(Exception):
@@ -27,6 +29,8 @@ def create_job(session: Session, submission: JobSubmission) -> Job:
     session.add(job)
     session.commit()
     session.refresh(job)
+    metrics.submitted.inc()
+    event(metrics.logger, "job.submitted", job_id=job.id, state=JobState.QUEUED)
     return job
 
 
@@ -43,4 +47,5 @@ def cancel_job(session: Session, job_id: UUID) -> Job:
     job.completed_at = datetime.now(timezone.utc)
     session.commit()
     session.refresh(job)
+    metrics.job_terminal(job)
     return job

@@ -6,6 +6,7 @@ from importlib.metadata import version
 import httpx
 import psutil
 
+from common.logging import event
 from common.schemas.states import WorkerState
 from common.schemas.workers import WorkerHeartbeat
 from worker.config import WorkerSettings
@@ -36,7 +37,7 @@ async def run_agent(settings: WorkerSettings, executor: Executor, ready: asyncio
             except ReconciliationRejected:
                 raise
             except ReconciliationFailed:
-                logger.warning('Reconciliation incomplete; claims require a successful fresh comparison')
+                event(logger, 'reconciliation.incomplete', level=logging.WARNING, worker_id=settings.id)
             try:
                 await asyncio.wait_for(reconnect.wait(), INTERVAL if initialized.is_set() else 5)
             except TimeoutError:
@@ -86,7 +87,9 @@ async def _heartbeats(settings, executor, ready, reconnect):
                     f"v1/workers/{settings.id}/heartbeat", json=payload.model_dump(mode="json"),
                 )
                 response.raise_for_status()
+                event(logger, "heartbeat.confirmed", level=logging.DEBUG, worker_id=settings.id, state=payload.state)
                 if disconnected:
+                    event(logger, "controller.reconnected", worker_id=settings.id)
                     reconnect.set()
                     disconnected = False
                 if ready is not None:
@@ -98,15 +101,15 @@ async def _heartbeats(settings, executor, ready, reconnect):
                         f"Heartbeat rejected (HTTP {status}); check controller URL, "
                         "worker ID/token, and agent/controller protocol compatibility"
                     ) from None
+                event(logger, "heartbeat.failed", level=logging.DEBUG if disconnected else logging.WARNING, worker_id=settings.id, outcome="controller_error")
                 disconnected = True
                 reconnect.set()
-                logger.warning("Heartbeat failed (HTTP %s); retrying", status)
             except httpx.RequestError:
+                event(logger, "heartbeat.failed", level=logging.DEBUG if disconnected else logging.WARNING, worker_id=settings.id, outcome="connection_error")
                 disconnected = True
                 reconnect.set()
-                logger.warning("Controller unavailable; retrying heartbeat")
             except (OSError, RuntimeError, ValueError):
-                logger.warning("Resource or runtime detection failed; retrying heartbeat")
+                event(logger, "heartbeat.detection_failed", level=logging.WARNING, worker_id=settings.id)
             # Keep the normal cadence without overlapping requests or retry storms.
             elapsed = asyncio.get_running_loop().time() - started
             end = asyncio.get_running_loop().time() + max(1, HEARTBEAT_INTERVAL - elapsed)

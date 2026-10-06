@@ -5,6 +5,8 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from controller import metrics
+from common.logging import event, attempt_context
 from common.schemas.assignments import WorkAssignment
 from common.schemas.jobs import JobResources
 from common.schemas.states import AttemptState, JobState, WorkerState
@@ -27,6 +29,7 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
     if worker is None or effective_worker_state(
         worker.last_heartbeat, worker.state, worker.executors, datetime.now(timezone.utc),
     ) != WorkerState.HEALTHY:
+        metrics.no_work.labels("worker_ineligible").inc()
         return None
 
     allocations = session.scalars(select(WorkerAllocation).where(WorkerAllocation.worker_id == worker_id))
@@ -39,6 +42,7 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
     available_cpu = Decimal(str(worker.cpu_contributed)) - reserved_cpu
     available_memory = worker.memory_contributed_mb - reserved_memory
     if available_cpu <= 0 or available_memory <= 0:
+        metrics.no_work.labels("insufficient_capacity").inc()
         return None
 
     runtimes = [runtime for runtime, usable in worker.executors.items() if usable]
@@ -51,9 +55,11 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
         ).order_by(Job.created_at, Job.id).limit(1).with_for_update(skip_locked=True)
     )
     if job is None:
+        metrics.no_work.labels("no_fitting_job").inc()
         return None
     if Decimal(str(job.cpu_requested)) > available_cpu:
         # Guard the boundary where conversion to float for SQL rounded upward.
+        metrics.no_work.labels("insufficient_capacity").inc()
         return None
     attempt_number = session.scalar(
         select(func.coalesce(func.max(JobAttempt.attempt_number), 0))
@@ -64,6 +70,8 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
         job.state = JobState.FAILED
         job.completed_at = controller_now(session)
         session.commit()
+        metrics.job_terminal(job)
+        metrics.no_work.labels("attempt_limit").inc()
         return None
     expires_at = deadline(controller_now(session))
     attempt = JobAttempt(
@@ -84,5 +92,11 @@ def claim_job(session: Session, worker_id: UUID) -> WorkAssignment | None:
         resources=JobResources(cpu=job.cpu_requested, memory_mb=job.memory_requested_mb),
         timeout_seconds=job.timeout_seconds, **timing(expires_at),
     )
+    context = attempt_context(attempt)
+    queue_seconds = max(0, (attempt.created_at - job.created_at).total_seconds())
     session.commit()
+    metrics.assignments.inc()
+    if attempt_number == 1:
+        metrics.queue_time.observe(queue_seconds)
+    event(metrics.logger, "attempt.assigned", **context)
     return assignment

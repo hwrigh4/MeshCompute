@@ -1,5 +1,6 @@
 """Worker-local provider intent and live-session status. No credentials or recovery."""
 import asyncio
+import logging
 from contextlib import contextmanager, suppress
 import fcntl
 import json
@@ -13,6 +14,8 @@ from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+
+from common.logging import event
 
 
 class ControlError(RuntimeError):
@@ -215,9 +218,12 @@ async def command(settings, action, cpu=None, memory=None):
             connection[1].close()
             with suppress(OSError):
                 await connection[1].wait_closed()
+    if action != 'status':
+        event(logging.getLogger(__name__), 'provider.control_applied', worker_id=settings.id, action=action, state=state.participation)
     if action == 'stop-all':
         from worker.agent.reconciliation import reclaim_local
         await reclaim_local(settings)
+        event(logging.getLogger(__name__), 'provider.local_reclaim_confirmed', worker_id=settings.id, action=action)
         print('Participation PAUSED; live local attempt cleaned or no live execution session. '
               'Explicitly worker-labeled containers reclaimed; controller release is separate.')
     elif action == 'status':
